@@ -2,10 +2,10 @@
     'use strict';
 
     var MANIFEST = {
-        id: 'dunhuatv_plugin_final',
-        version: '7.0.0',
+        id: 'dunhuatv_plugin_platinum',
+        version: '9.0.0',
         name: 'Дунхуа ТВ',
-        description: 'Full version',
+        description: 'Maximum Version',
         type: 'video',
         author: 'DipIick'
     };
@@ -334,29 +334,30 @@
         return comp;
     }
 
-    function addMenuButton() {
-        var menu_list = $('.menu .menu__list');
-        if (menu_list.length > 0) {
-            if (menu_list.find('.menu-item-dunhua').length === 0) {
+    function checkMenu() {
+        var menu = $('.menu .menu__list');
+        if (menu.length > 0) {
+            if (menu.find('.dunhua-tv-button').length === 0) {
                 var item = Lampa.Template.get('menu_item', {
                     title: MANIFEST.name,
                     icon: '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>'
                 });
-                item.addClass('menu-item-dunhua');
+                item.addClass('dunhua-tv-button');
                 item.on('hover:enter', function () {
                     Lampa.Activity.push({ url: '', title: MANIFEST.name, component: 'dunhuatv', page: 1 });
                 });
-                menu_list.eq(0).append(item);
+                
+                menu.eq(0).prepend(item);
             }
-        } else {
-            setTimeout(addMenuButton, 2000);
         }
     }
 
     function startPlugin() {
         window.plugin_dunhuatv_max_ready = true;
         Lampa.Component.add('dunhuatv', DunhuaComponent);
-        addMenuButton();
+        
+        setInterval(checkMenu, 1000);
+        Lampa.Noty.show('Дунхуа ТВ: Загружено (v9)');
     }
 
     if (!window.plugin_dunhuatv_max_ready) {
