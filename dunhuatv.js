@@ -6,8 +6,8 @@
     window.dunhuatv_plugin = true;
 
     // --- КОНФИГУРАЦИЯ ---
-    // Используем allorigins как более стабильный для GET запросов
-    var default_proxy = 'https://api.allorigins.win/raw?url='; 
+    // corsproxy.io часто работает стабильнее для DLE сайтов
+    var default_proxy = 'https://corsproxy.io/?'; 
     
     // Список зеркал (основной + резервные)
     var mirrors = [
@@ -46,14 +46,16 @@
         var network = new Lampa.Reguest();
         var proxy = DunhuaStorage.get('proxy') || default_proxy;
         
-        // Логика формирования URL для разных типов прокси
-        // Если прокси заканчивается на =, значит он ожидает URL параметром (как allorigins)
-        // Если нет, добавляем слэш (как cors.work)
         var base_url = mirrors[current_mirror_index];
         var final_url = base_url + path;
         var fetch_url = '';
 
-        if (proxy.slice(-1) === '=') {
+        // Улучшенная логика формирования URL прокси
+        if (proxy.indexOf('allorigins') > -1) {
+            fetch_url = proxy + encodeURIComponent(final_url);
+        } else if (proxy.indexOf('corsproxy.io') > -1) {
+            fetch_url = proxy + final_url; // corsproxy.io обычно принимает URL "как есть" после ?
+        } else if (proxy.slice(-1) === '=') {
             fetch_url = proxy + encodeURIComponent(final_url);
         } else if (proxy.slice(-1) === '/') {
             fetch_url = proxy + final_url;
@@ -64,6 +66,13 @@
         console.log('[DunhuaTV] Request:', fetch_url);
 
         network.silent(fetch_url, function(result){
+            // Проверка, вернул ли прокси JSON вместо HTML (бывает у allorigins без raw)
+            try {
+                var json = JSON.parse(result);
+                if (json.contents) result = json.contents;
+            } catch (e) {
+                // Это не JSON, значит чистый HTML, продолжаем
+            }
             callback(result);
         }, function(a, c){
             console.log('[DunhuaTV] Request failed:', a);
@@ -80,74 +89,107 @@
             var cards = [];
             var site_url = mirrors[current_mirror_index];
 
-            // Проверка на Cloudflare/защиту
+            // 1. Проверка на Cloudflare/защиту
             var pageTitle = $(doc).find('title').text();
-            if (pageTitle.includes('Cloudflare') || pageTitle.includes('DDOS-GUARD')) {
-                Lampa.Noty.show('Сайт защищен Cloudflare. Попробуйте другой Proxy.');
+            if (pageTitle.includes('Cloudflare') || pageTitle.includes('DDOS-GUARD') || pageTitle.includes('Just a moment')) {
+                Lampa.Noty.show('Сайт защищен. Смените прокси.');
                 return [];
             }
 
-            // РАСШИРЕННЫЕ СЕЛЕКТОРЫ DLE
-            // Ищем контейнеры. .th-item - частый класс для плиток
-            var elements = $(doc).find('.custom-item, .shortstory, .movie-item, .th-item, .item, .short, .post');
+            // 2. Сбор элементов (АГРЕССИВНЫЙ ПОИСК)
+            // Сначала пробуем известные классы
+            var elements = $(doc).find('.custom-item, .shortstory, .movie-item, .th-item, .item, .short, .post, .owl-item, .card');
             
-            // Если не нашли специфичные классы, ищем всё внутри контента
-            if(elements.length === 0) elements = $(doc).find('#dle-content > div');
+            // Если ничего не нашли по классам, ищем внутри контентного блока любые div, у которых есть ссылка и картинка
+            if(elements.length === 0) {
+                 elements = $(doc).find('#dle-content div, #main div, .content div').filter(function() {
+                     return $(this).find('a').length > 0 && ($(this).find('img').length > 0 || $(this).find('[style*="background-image"]').length > 0);
+                 });
+                 // Фильтруем, чтобы не брать слишком мелкие элементы или обертки
+                 elements = elements.filter(function(){ return $(this).find('a').attr('href') && $(this).find('a').attr('href').length > 5 });
+            }
 
             console.log('[DunhuaTV] Found elements:', elements.length);
 
             elements.each(function () {
                 var el = $(this);
                 
-                // Ссылки: ищем прямой a, или a.th-in, или a.short-img
+                // Ссылки: ищем первую попавшуюся
                 var linkEl = el.find('a').first();
-                // Если внутри элемента есть заголовок со ссылкой, лучше взять его
-                if (el.find('.th-title a, .short-title a, h2 a').length > 0) {
-                    linkEl = el.find('.th-title a, .short-title a, h2 a').first();
+                // Приоритет заголовкам
+                if (el.find('h2 a, h3 a, .title a, .name a').length > 0) {
+                    linkEl = el.find('h2 a, h3 a, .title a, .name a').first();
                 }
 
                 var link = linkEl.attr('href');
 
                 // Картинки: img src или data-src
-                var img = el.find('img').first().attr('src') || el.find('img').first().attr('data-src');
+                var imgEl = el.find('img').first();
+                var img = imgEl.attr('src') || imgEl.attr('data-src') || imgEl.attr('data-original');
                 
                 // Названия
-                var title = el.find('.custom-item-title, .short-title, h2, .title, .ntitle, .th-title').text().trim();
+                var title = el.find('.custom-item-title, .short-title, h2, h3, .title, .ntitle, .th-title, .name').text().trim();
                 
-                // Если заголовка нет, пробуем взять из alt картинки
-                if (!title) title = el.find('img').first().attr('alt');
+                // Если заголовка нет, пробуем взять из alt картинки или title ссылки
+                if (!title) title = imgEl.attr('alt') || linkEl.attr('title');
 
-                // Доп инфо
+                // Попытка найти картинку в стилях (background-image), если img тег пустой или это заглушка
+                if (!img || img.indexOf('no_image') > -1) {
+                    var style = el.find('[style*="background-image"]').attr('style') || el.attr('style');
+                    if(style && style.match(/url\((.*?)\)/)){
+                        var url_match = style.match(/url\((.*?)\)/)[1].replace(/['"]/g,'');
+                        if(url_match) img = url_match;
+                    }
+                }
+
+                // Доп инфо (не критично, если пусто)
                 var quality = el.find('.quality, .ribbon-quality, .th-qual').text().trim() || ''; 
                 var rating = el.find('.rating, .rate, .imdb, .th-rate').text().trim() || '';
                 var status = el.find('.status, .date, .th-series').text().trim() || '';
                 
-                // Исправление путей
-                if (link && link.indexOf('http') === -1) link = site_url + link;
-                if (img) {
-                    if (img.indexOf('http') === -1) img = site_url + (img.indexOf('/') === 0 ? '' : '/') + img;
-                } else {
-                    // Попытка найти картинку в стилях (background-image)
-                    var style = el.find('[style*="background-image"]').attr('style');
-                    if(style && style.match(/url\((.*?)\)/)){
-                        img = style.match(/url\((.*?)\)/)[1].replace(/['"]/g,'');
-                        if (img.indexOf('http') === -1) img = site_url + img;
+                // Валидация и фикс путей
+                if (link && title) {
+                    // Фикс относительных путей
+                    if (link.indexOf('http') === -1) {
+                        if (link.indexOf('/') !== 0) link = '/' + link;
+                        link = site_url + link;
+                    }
+                    
+                    if (img) {
+                        if (img.indexOf('http') === -1) {
+                            if (img.indexOf('/') !== 0) img = '/' + img;
+                            img = site_url + img;
+                        }
+                    } else {
+                        img = './img/img_broken.svg'; // Заглушка, чтобы карточка всё равно создалась
+                    }
+
+                    // Исключаем системные ссылки (категории, юзеры, архивы)
+                    if (link.indexOf('/user/') === -1 && link.indexOf('/tags/') === -1 && link.indexOf('/xfsearch/') === -1) {
+                        cards.push({
+                            title: title,
+                            img: img,
+                            url: link,
+                            quality: quality,
+                            rating: rating,
+                            status: status,
+                            original_element: el
+                        });
                     }
                 }
-
-                if (title && link && link.indexOf('/user/') === -1) { // Исключаем ссылки на профили
-                    cards.push({
-                        title: title,
-                        img: img,
-                        url: link,
-                        quality: quality,
-                        rating: rating,
-                        status: status,
-                        original_element: el
-                    });
+            });
+            
+            // Удаляем дубликаты (иногда парсер цепляет и обертку и внутренний блок)
+            var uniqueCards = [];
+            var seenUrls = new Set();
+            cards.forEach(function(c){
+                if(!seenUrls.has(c.url)){
+                    seenUrls.add(c.url);
+                    uniqueCards.push(c);
                 }
             });
-            return cards;
+            
+            return uniqueCards;
         }
     };
 
@@ -369,11 +411,14 @@
             Lampa.Loading.start(function () { Lampa.Loading.stop(); });
 
             var path = url.replace(mirrors[current_mirror_index], '');
-            // Удаляем префикс прокси из URL, если он там случайно остался
             var proxy = DunhuaStorage.get('proxy') || default_proxy;
+            // Чистим path от прокси
             if(path.indexOf(proxy) === 0) path = path.replace(proxy, '');
-            
-            // Если path стал абсолютным URL, это нормально, smartRequest обработает
+            // Чистим от протоколов, если остались
+            if(path.indexOf('http') === 0 && path.indexOf(mirrors[current_mirror_index]) > -1) {
+                 path = path.replace(mirrors[current_mirror_index], '');
+            }
+
             
             smartRequest(path, function (html) {
                 Lampa.Loading.stop();
