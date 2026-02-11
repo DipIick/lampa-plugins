@@ -6,7 +6,9 @@
     window.dunhuatv_plugin = true;
 
     // --- КОНФИГУРАЦИЯ ---
-    var default_proxy = 'https://cors.work/'; // Публичный прокси
+    // Используем allorigins как более стабильный для GET запросов
+    var default_proxy = 'https://api.allorigins.win/raw?url='; 
+    
     // Список зеркал (основной + резервные)
     var mirrors = [
         'https://dunhuatv.ru',
@@ -28,7 +30,6 @@
     };
 
     // --- УТИЛИТЫ ---
-    // Генерация уникального ID для истории просмотра на основе URL
     function generateId(url) {
         var hash = 0, i, chr;
         if (url.length === 0) return hash;
@@ -37,60 +38,96 @@
             hash = ((hash << 5) - hash) + chr;
             hash |= 0; 
         }
-        return Math.abs(hash); // Lampa любит положительные ID
+        return Math.abs(hash);
     }
 
-    // Обертка для запросов с поддержкой зеркал и прокси
+    // Обертка для запросов
     function smartRequest(path, callback, error_callback) {
         var network = new Lampa.Reguest();
         var proxy = DunhuaStorage.get('proxy') || default_proxy;
-        if(proxy.slice(-1) == '/') proxy = proxy.slice(0, -1);
         
+        // Логика формирования URL для разных типов прокси
+        // Если прокси заканчивается на =, значит он ожидает URL параметром (как allorigins)
+        // Если нет, добавляем слэш (как cors.work)
         var base_url = mirrors[current_mirror_index];
         var final_url = base_url + path;
-        
-        // Сразу пробуем через прокси, так как сайт без CORS
-        var fetch_url = proxy + '/' + final_url;
+        var fetch_url = '';
+
+        if (proxy.slice(-1) === '=') {
+            fetch_url = proxy + encodeURIComponent(final_url);
+        } else if (proxy.slice(-1) === '/') {
+            fetch_url = proxy + final_url;
+        } else {
+            fetch_url = proxy + '/' + final_url;
+        }
+
+        console.log('[DunhuaTV] Request:', fetch_url);
 
         network.silent(fetch_url, function(result){
             callback(result);
         }, function(a, c){
-            // Если ошибка, можно попробовать сменить зеркало или прокси (упрощенная логика)
-            console.log('DunhuaTV: Request failed', a);
+            console.log('[DunhuaTV] Request failed:', a);
             if(error_callback) error_callback(a, c);
         }, false, {
             dataType: 'text'
         });
     }
 
-    // --- ПАРСЕР (Shared Logic) ---
+    // --- ПАРСЕР ---
     var Parser = {
         getCards: function(html) {
             var doc = (new DOMParser()).parseFromString(html, "text/html");
             var cards = [];
             var site_url = mirrors[current_mirror_index];
 
-            // Основные селекторы DLE
-            var elements = $(doc).find('.custom-item, .shortstory, .movie-item, .th-item, .item');
+            // Проверка на Cloudflare/защиту
+            var pageTitle = $(doc).find('title').text();
+            if (pageTitle.includes('Cloudflare') || pageTitle.includes('DDOS-GUARD')) {
+                Lampa.Noty.show('Сайт защищен Cloudflare. Попробуйте другой Proxy.');
+                return [];
+            }
+
+            // РАСШИРЕННЫЕ СЕЛЕКТОРЫ DLE
+            // Ищем контейнеры. .th-item - частый класс для плиток
+            var elements = $(doc).find('.custom-item, .shortstory, .movie-item, .th-item, .item, .short, .post');
+            
+            // Если не нашли специфичные классы, ищем всё внутри контента
             if(elements.length === 0) elements = $(doc).find('#dle-content > div');
+
+            console.log('[DunhuaTV] Found elements:', elements.length);
 
             elements.each(function () {
                 var el = $(this);
-                var link = el.find('a').first().attr('href');
-                var img = el.find('img').first().attr('src') || el.find('img').first().attr('data-src');
-                var title = el.find('.custom-item-title, .short-title, h2, .title, .ntitle').text().trim();
                 
-                // Парсинг доп. информации (Quality of Life)
-                var quality = el.find('.quality, .ribbon-quality').text().trim() || ''; 
-                var rating = el.find('.rating, .rate, .imdb').text().trim() || '';
-                var status = el.find('.status, .date').text().trim() || '';
+                // Ссылки: ищем прямой a, или a.th-in, или a.short-img
+                var linkEl = el.find('a').first();
+                // Если внутри элемента есть заголовок со ссылкой, лучше взять его
+                if (el.find('.th-title a, .short-title a, h2 a').length > 0) {
+                    linkEl = el.find('.th-title a, .short-title a, h2 a').first();
+                }
+
+                var link = linkEl.attr('href');
+
+                // Картинки: img src или data-src
+                var img = el.find('img').first().attr('src') || el.find('img').first().attr('data-src');
+                
+                // Названия
+                var title = el.find('.custom-item-title, .short-title, h2, .title, .ntitle, .th-title').text().trim();
+                
+                // Если заголовка нет, пробуем взять из alt картинки
+                if (!title) title = el.find('img').first().attr('alt');
+
+                // Доп инфо
+                var quality = el.find('.quality, .ribbon-quality, .th-qual').text().trim() || ''; 
+                var rating = el.find('.rating, .rate, .imdb, .th-rate').text().trim() || '';
+                var status = el.find('.status, .date, .th-series').text().trim() || '';
                 
                 // Исправление путей
                 if (link && link.indexOf('http') === -1) link = site_url + link;
                 if (img) {
                     if (img.indexOf('http') === -1) img = site_url + (img.indexOf('/') === 0 ? '' : '/') + img;
                 } else {
-                    // Попытка найти картинку в стилях
+                    // Попытка найти картинку в стилях (background-image)
                     var style = el.find('[style*="background-image"]').attr('style');
                     if(style && style.match(/url\((.*?)\)/)){
                         img = style.match(/url\((.*?)\)/)[1].replace(/['"]/g,'');
@@ -98,7 +135,7 @@
                     }
                 }
 
-                if (title && link) {
+                if (title && link && link.indexOf('/user/') === -1) { // Исключаем ссылки на профили
                     cards.push({
                         title: title,
                         img: img,
@@ -229,7 +266,7 @@
             }, function(e){
                 _this.loading(false);
                 active_request = false;
-                Lampa.Noty.show('Ошибка загрузки. Проверьте настройки Proxy.');
+                Lampa.Noty.show('Ошибка сети. Проверьте консоль и настройки Proxy.');
             });
         };
 
@@ -270,8 +307,6 @@
 
                 // --- INTERACTION: FOCUS BACKDROP ---
                 card.on('hover:focus', function () {
-                    // Используем Lampa.Background для смены обоев
-                    // Если есть element.img, используем его
                     if(element.img) Lampa.Background.change(element.img);
                 });
 
@@ -283,10 +318,8 @@
                 // --- UX: CONTEXT MENU (Long Press) ---
                 card.on('hover:long', function () {
                     Lampa.ContextMenu.show({
-                        item: Lampa.Template.get('items_line_card', element), // фиктивный item для контекста
+                        item: Lampa.Template.get('items_line_card', element), 
                         onSelect: function (a) {
-                           // Здесь можно прикрутить стандартные действия
-                           // Но пока просто продублируем меню
                            _this.showMenu(element);
                         }
                     });
@@ -335,34 +368,32 @@
             var _this = this;
             Lampa.Loading.start(function () { Lampa.Loading.stop(); });
 
-            // Получаем только путь от URL, если он полный
-            var path = url.replace(mirrors[current_mirror_index], '').replace(DunhuaStorage.get('proxy') || default_proxy, '');
-            if(path.indexOf('http') === 0) path = url; // Если это абсолютная ссылка
-
+            var path = url.replace(mirrors[current_mirror_index], '');
+            // Удаляем префикс прокси из URL, если он там случайно остался
+            var proxy = DunhuaStorage.get('proxy') || default_proxy;
+            if(path.indexOf(proxy) === 0) path = path.replace(proxy, '');
+            
+            // Если path стал абсолютным URL, это нормально, smartRequest обработает
+            
             smartRequest(path, function (html) {
                 Lampa.Loading.stop();
                 var doc = (new DOMParser()).parseFromString(html, "text/html");
                 var sources = [];
 
-                // 1. Поиск плейлистов в табах (обычная история для DLE)
-                // Ищем заголовки табов
+                // 1. Поиск плейлистов в табах
                 var tabs_titles = [];
-                $(doc).find('.tabs .tab, .xf_playlists li, .nav-tabs li').each(function(){
+                $(doc).find('.tabs .tab, .xf_playlists li, .nav-tabs li, .kino-lines li').each(function(){
                     tabs_titles.push($(this).text().trim());
                 });
 
-                // Ищем контент табов (iframe внутри)
-                var tabs_content = $(doc).find('.tabs_content, .tab-content .tab-pane, .xf_playlists_content .box');
+                var tabs_content = $(doc).find('.tabs_content, .tab-content .tab-pane, .xf_playlists_content .box, .kino-lines .kino-box');
                 
                 if(tabs_content.length > 0) {
                      tabs_content.each(function(index){
                          var name = tabs_titles[index] || ('Источник ' + (index + 1));
                          var frame = $(this).find('iframe').attr('src') || $(this).find('iframe').attr('data-src');
                          if(frame) {
-                             sources.push({
-                                 title: name,
-                                 url: frame
-                             });
+                             sources.push({ title: name, url: frame });
                          }
                      });
                 }
@@ -373,24 +404,15 @@
                         var src = $(this).attr('src') || $(this).attr('data-src');
                         if(src) {
                              var name = 'Основной плеер';
-                             // Пытаемся угадать название по домену
                              if(src.indexOf('kodik') > -1) name = 'Kodik';
                              if(src.indexOf('sibnet') > -1) name = 'Sibnet';
-                             if(src.indexOf('youtube') > -1) name = 'YouTube';
-                             
-                             sources.push({
-                                 title: name,
-                                 url: src
-                             });
+                             sources.push({ title: name, url: src });
                         }
                     });
                 }
 
-                // 3. Похожие (Similars) - просто парсим, если найдем
-                // Реализуем как уведомление, что можно найти в поиске, или добавим позже
-                
                 if (sources.length > 0) {
-                    _this.play(sources, title, url); // Передаем URL страницы для генерации ID
+                    _this.play(sources, title, url);
                 } else {
                     Lampa.Noty.show('Видео не найдено на странице');
                 }
@@ -404,7 +426,6 @@
         this.play = function (links, title, page_url) {
             var _this = this;
             
-            // Функция запуска плеера
             var startPlayer = function(link_obj) {
                 var video_url = link_obj.url;
                 if(video_url.indexOf('http') === -1) video_url = 'https:' + video_url;
@@ -412,21 +433,18 @@
                 var video = {
                     title: title,
                     url: video_url,
-                    // Интеграция с History/Timeline
                     id: generateId(page_url), 
                     source: 'dunhuatv',
-                    season: 1, // заглушка
-                    episode: 1, // заглушка
+                    season: 1, 
+                    episode: 1, 
                     timeline: {
                         title: title,
-                        // Указываем исходный URL как ID для сохранения прогресса
                         hash: generateId(page_url) 
                     }
                 };
 
                 Lampa.Player.play(video);
                 
-                // Добавляем в локальную историю Lampa
                 var history = new Lampa.History();
                 history.add(video);
             };
@@ -500,7 +518,7 @@
         this.empty = function (msg) {
             scroll.append(Lampa.Template.get('empty', {
                 title: msg || 'Пусто',
-                descr: 'Ничего не найдено'
+                descr: 'Ничего не найдено (или ошибка парсинга)'
             }));
         };
 
@@ -515,7 +533,6 @@
         window.plugin_dunhuatv_ready = true;
         Lampa.Component.add('dunhuatv', DunhuaTV);
 
-        // 1. Добавляем кнопку в боковое меню
         var button = $('<li class="menu__item selector" data-action="dunhua"><div class="menu__ico"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 2L2 7L12 12L22 7L12 2Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M2 17L12 22L22 17" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M2 12L12 17L22 12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></div><div class="menu__text">Дунхуа</div></li>');
 
         button.on('hover:enter', function () {
@@ -529,22 +546,19 @@
 
         $('.menu .menu__list').eq(0).append(button);
 
-        // 2. Глобальный поиск: Регистрируем провайдер
         Lampa.Search.addSource({
             title: 'Дунхуа ТВ',
             search: function(query, callback) {
-                 // Используем smartRequest для поиска
                  var path = '/index.php?do=search&subaction=search&story=' + encodeURIComponent(query);
                  smartRequest(path, function(html){
                      var cards = Parser.getCards(html);
-                     // Преобразуем формат для глобального поиска Lampa
                      var results = cards.map(function(card){
-                         card.type = 'anime'; // чтобы лампа знала тип
+                         card.type = 'anime';
                          return card;
                      });
                      callback(results);
                  }, function(){
-                     callback([]); // Если ошибка, возвращаем пустоту
+                     callback([]);
                  });
             }
         });
