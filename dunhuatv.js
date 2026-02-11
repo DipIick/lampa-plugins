@@ -1,180 +1,560 @@
 (function () {
     'use strict';
 
-    var MANIFEST = {
-        id: 'dunhuatv_plugin_root',
-        version: '11.0.0',
-        name: 'Дунхуа ТВ',
-        description: 'Официальный клиент dunhuatv.ru'
+    // Проверка на повторную инициализацию
+    if (window.dunhuatv_plugin) return;
+    window.dunhuatv_plugin = true;
+
+    // --- КОНФИГУРАЦИЯ ---
+    var default_proxy = 'https://cors.work/'; // Публичный прокси
+    // Список зеркал (основной + резервные)
+    var mirrors = [
+        'https://dunhuatv.ru',
+        'https://www.dunhuatv.ru' 
+    ];
+    var current_mirror_index = 0;
+
+    // --- ХРАНИЛИЩЕ ---
+    var DunhuaStorage = {
+        get: function (name) {
+            return Lampa.Storage.get('dunhuatv_' + name, '');
+        },
+        set: function (name, value) {
+            Lampa.Storage.set('dunhuatv_' + name, value);
+        },
+        field: function (name) {
+            return Lampa.Storage.field('dunhuatv_' + name);
+        }
     };
 
-    var SETTINGS = {
-        get: function(name, def) { return Lampa.Storage.get('dunhua_' + name, def); },
-        set: function(name, value) { Lampa.Storage.set('dunhua_' + name, value); }
-    };
+    // --- УТИЛИТЫ ---
+    // Генерация уникального ID для истории просмотра на основе URL
+    function generateId(url) {
+        var hash = 0, i, chr;
+        if (url.length === 0) return hash;
+        for (i = 0; i < url.length; i++) {
+            chr = url.charCodeAt(i);
+            hash = ((hash << 5) - hash) + chr;
+            hash |= 0; 
+        }
+        return Math.abs(hash); // Lampa любит положительные ID
+    }
 
-    function Component(object) {
-        var comp = new Lampa.Component();
+    // Обертка для запросов с поддержкой зеркал и прокси
+    function smartRequest(path, callback, error_callback) {
         var network = new Lampa.Reguest();
-        var state = { page: 1, query: '', items: [], mode: 'main' };
-        var ui = { info: null, body: null };
+        var proxy = DunhuaStorage.get('proxy') || default_proxy;
+        if(proxy.slice(-1) == '/') proxy = proxy.slice(0, -1);
+        
+        var base_url = mirrors[current_mirror_index];
+        var final_url = base_url + path;
+        
+        // Сразу пробуем через прокси, так как сайт без CORS
+        var fetch_url = proxy + '/' + final_url;
 
-        comp.create = function () {
-            this.activity.loader(true);
-            Lampa.Background.immediately('');
-            
-            ui.info = Lampa.Template.get('info', { title: MANIFEST.name, poster: '' });
-            
-            var btn_search = $('<div class="info__button selector"><svg style="width: 24px; height: 24px;" viewBox="0 0 24 24"><path fill="currentColor" d="M9.5,3A6.5,6.5 0 0,1 16,9.5C16,11.11 15.41,12.59 14.44,13.73L14.71,14H15.5L20.5,19L19,20.5L14,15.5V14.71L13.73,14.44C12.59,15.41 11.11,16 9.5,16A6.5,6.5 0 0,1 3,9.5A6.5,6.5 0 0,1 9.5,3M9.5,5C7,5 5,7 5,9.5C5,12 7,14 9.5,14C12,14 14,12 14,9.5C14,7 12,5 9.5,5Z" /></svg></div>');
-            btn_search.on('hover:enter', function() {
-                Lampa.Input.edit({ title: 'Поиск', value: '', free: true, nosave: true }, function(val) {
-                    if (val) { state.page = 1; state.query = val; state.mode = 'search'; state.items = []; ui.info.find('.info__title').text('Поиск: ' + val); comp.load(); }
-                });
+        network.silent(fetch_url, function(result){
+            callback(result);
+        }, function(a, c){
+            // Если ошибка, можно попробовать сменить зеркало или прокси (упрощенная логика)
+            console.log('DunhuaTV: Request failed', a);
+            if(error_callback) error_callback(a, c);
+        }, false, {
+            dataType: 'text'
+        });
+    }
+
+    // --- ПАРСЕР (Shared Logic) ---
+    var Parser = {
+        getCards: function(html) {
+            var doc = (new DOMParser()).parseFromString(html, "text/html");
+            var cards = [];
+            var site_url = mirrors[current_mirror_index];
+
+            // Основные селекторы DLE
+            var elements = $(doc).find('.custom-item, .shortstory, .movie-item, .th-item, .item');
+            if(elements.length === 0) elements = $(doc).find('#dle-content > div');
+
+            elements.each(function () {
+                var el = $(this);
+                var link = el.find('a').first().attr('href');
+                var img = el.find('img').first().attr('src') || el.find('img').first().attr('data-src');
+                var title = el.find('.custom-item-title, .short-title, h2, .title, .ntitle').text().trim();
+                
+                // Парсинг доп. информации (Quality of Life)
+                var quality = el.find('.quality, .ribbon-quality').text().trim() || ''; 
+                var rating = el.find('.rating, .rate, .imdb').text().trim() || '';
+                var status = el.find('.status, .date').text().trim() || '';
+                
+                // Исправление путей
+                if (link && link.indexOf('http') === -1) link = site_url + link;
+                if (img) {
+                    if (img.indexOf('http') === -1) img = site_url + (img.indexOf('/') === 0 ? '' : '/') + img;
+                } else {
+                    // Попытка найти картинку в стилях
+                    var style = el.find('[style*="background-image"]').attr('style');
+                    if(style && style.match(/url\((.*?)\)/)){
+                        img = style.match(/url\((.*?)\)/)[1].replace(/['"]/g,'');
+                        if (img.indexOf('http') === -1) img = site_url + img;
+                    }
+                }
+
+                if (title && link) {
+                    cards.push({
+                        title: title,
+                        img: img,
+                        url: link,
+                        quality: quality,
+                        rating: rating,
+                        status: status,
+                        original_element: el
+                    });
+                }
             });
-            ui.info.find('.info__right').prepend(btn_search);
+            return cards;
+        }
+    };
 
-            var btn_fav = $('<div class="info__button selector"><svg style="width: 24px; height: 24px;" viewBox="0 0 24 24"><path fill="currentColor" d="M12,21.35L10.55,20.03C5.4,15.36 2,12.27 2,8.5C2,5.41 4.42,3 7.5,3C9.24,3 10.91,3.81 12,5.08C13.09,3.81 14.76,3 16.5,3C19.58,3 22,5.41 22,8.5C22,12.27 18.6,15.36 13.45,20.03L12,21.35Z" /></svg></div>');
-            btn_fav.on('hover:enter', function() {
-                var favs = SETTINGS.get('favorites', []);
-                if(favs.length) { state.items = favs; state.mode = 'favs'; ui.info.find('.info__title').text('Избранное'); comp.build(favs, false); this.activity.loader(false); } 
-                else Lampa.Noty.show('Избранное пусто');
+
+    // --- ОСНОВНОЙ КОМПОНЕНТ ---
+    function DunhuaTV(object) {
+        var component = new Lampa.Component();
+        var item = Lampa.Template.get('items_line_card');
+        var scroll;
+        var items = [];
+        var page = 1;
+        var last_query = '';
+        var search_mode = false;
+        var active_request = false;
+
+        this.create = function () {
+            var _this = this;
+
+            this.activity.target = Lampa.Template.get('activity_search');
+            this.activity.target.find('.search__source').text('Дунхуа ТВ');
+            this.activity.target.find('.search__input').attr('placeholder', 'Поиск аниме...');
+            this.activity.target.find('.search__keyboard').hide();
+
+            scroll = this.activity.target.find('.search__results');
+
+            this.activity.target.find('.search__input').on('keydown', function (e) {
+                if (e.keyCode == 13) {
+                    last_query = $(this).val();
+                    _this.startSearch(last_query);
+                }
             });
-            ui.info.find('.info__right').prepend(btn_fav);
-
-            ui.body = $('<div class="category-full"></div>');
-            this.activity.append(ui.body);
             
+            this.activity.target.find('.search__button').on('click', function(){
+                var value = _this.activity.target.find('.search__input').val();
+                _this.startSearch(value);
+            });
+
+            // Расширенная шапка
+            var controls = $('<div class="dunhuatv-controls layer--height"></div>');
+            
+            var btn_fav = $('<div class="selector search__filter-button" style="margin-right:10px;">Избранное</div>');
+            btn_fav.on('hover:enter', function () { _this.openFavorites(); });
+
+            var btn_settings = $('<div class="selector search__filter-button">Настройки</div>');
+            btn_settings.on('hover:enter', function () { _this.openSettings(); });
+            
+            var btn_reset = $('<div class="selector search__filter-button" style="margin-right:10px;">Главная</div>');
+            btn_reset.on('hover:enter', function () { _this.reset(); });
+
+            controls.append(btn_reset).append(btn_fav).append(btn_settings);
+            this.activity.target.find('.search__head').append(controls);
+
+            return this.activity.target;
+        };
+
+        this.start = function () {
+            var _this = this;
+            Lampa.Controller.add('content', {
+                toggle: function () {
+                    Lampa.Controller.collectionSet(scroll);
+                    Lampa.Controller.collectionFocus(false, scroll);
+                },
+                left: function () {
+                    if (Navigator.canmove('left')) Navigator.move('left');
+                    else Lampa.Controller.toggle('menu');
+                },
+                right: function () { Navigator.move('right'); },
+                up: function () {
+                    if (Navigator.canmove('up')) Navigator.move('up');
+                    else Lampa.Controller.toggle('head');
+                },
+                down: function () { if (Navigator.canmove('down')) Navigator.move('down'); },
+                back: function () { Lampa.Activity.backward(); }
+            });
+
+            Lampa.Controller.toggle('content');
             this.load();
-            return ui.info;
         };
 
-        comp.load = function() {
-            this.activity.loader(true);
-            var proxy = SETTINGS.get('proxy', 'https://corsproxy.io/?');
-            var base = 'https://dunhuatv.ru';
-            var url = state.mode === 'search' ? 
-                proxy + encodeURIComponent(base + '/index.php?do=search&subaction=search&story=' + state.query + '&from_page=' + state.page) :
-                proxy + encodeURIComponent(base + (state.page > 1 ? '/page/' + state.page + '/' : ''));
-
-            network.silent(url, function(str) { comp.parse(str); }, function() { Lampa.Noty.show('Ошибка сети'); comp.activity.loader(false); });
+        this.reset = function(){
+            page = 1;
+            items = [];
+            search_mode = false;
+            last_query = '';
+            scroll.empty();
+            this.activity.target.find('.search__input').val('');
+            this.load();
         };
 
-        comp.parse = function(str) {
-            var doc = new DOMParser().parseFromString(str, "text/html");
-            var items = [];
-            var sels = ['.shortstory', '.custom-poster', '.item', '.movie-item'];
+        this.startSearch = function(query){
+            if(!query) return;
+            page = 1;
+            items = [];
+            search_mode = true;
+            scroll.empty();
+            this.load(query);
+        }
+
+        this.load = function (query) {
+            var _this = this;
+            this.loading(true);
+            active_request = true;
+
+            var path = '';
+            if(search_mode && query){
+                 path = '/index.php?do=search&subaction=search&story=' + encodeURIComponent(query);
+                 if(page > 1) path += '&search_start=' + page;
+            } else {
+                path = (page > 1 ? '/page/' + page + '/' : '/');
+            }
+
+            smartRequest(path, function(html){
+                _this.loading(false);
+                active_request = false;
+                _this.parse(html);
+            }, function(e){
+                _this.loading(false);
+                active_request = false;
+                Lampa.Noty.show('Ошибка загрузки. Проверьте настройки Proxy.');
+            });
+        };
+
+        this.parse = function (html) {
+            var cards = Parser.getCards(html);
             
-            for(var i=0; i<sels.length; i++) {
-                var els = doc.querySelectorAll(sels[i]);
-                if(els.length) {
-                    els.forEach(function(el) {
-                        var img = el.querySelector('img');
-                        var a = el.querySelector('a');
-                        var t = el.querySelector('.short-title, .title, h2, h3');
-                        if(img && a) {
-                            var src = img.getAttribute('data-src') || img.getAttribute('src');
-                            var href = a.getAttribute('href');
-                            if(src && src.indexOf('http') == -1) src = 'https://dunhuatv.ru' + src;
-                            if(href && href.indexOf('http') == -1) href = 'https://dunhuatv.ru' + href;
-                            items.push({ title: t ? t.innerText.trim() : 'Anime', img: src, url: href });
+            if (cards.length > 0) {
+                this.append(cards);
+                page++;
+            } else {
+                if(page === 1) this.empty();
+            }
+        };
+
+        this.append = function (data) {
+            var _this = this;
+            data.forEach(function (element) {
+                var card = Lampa.Template.get('card', {
+                    title: element.title,
+                    release_year: element.status || ''
+                });
+
+                card.addClass('card--collection');
+                
+                // --- VISUAL: BADGES ---
+                if(element.quality) {
+                    card.find('.card__view').append('<div class="card__quality" style="position:absolute; top:5px; left:5px; background:#e0a424; color:#000; padding:2px 5px; border-radius:3px; font-size:0.7em; font-weight:bold;">'+element.quality+'</div>');
+                }
+                if(element.rating) {
+                    card.find('.card__view').append('<div class="card__type" style="position:absolute; top:5px; right:5px; background:rgba(0,0,0,0.7); padding:2px 5px; border-radius:3px;">'+element.rating+'</div>');
+                }
+
+                // Изображение
+                var img = card.find('.card__img')[0];
+                img.onload = function () { card.addClass('card--loaded'); };
+                img.onerror = function () { img.src = './img/img_broken.svg'; };
+                img.src = element.img;
+
+                // --- INTERACTION: FOCUS BACKDROP ---
+                card.on('hover:focus', function () {
+                    // Используем Lampa.Background для смены обоев
+                    // Если есть element.img, используем его
+                    if(element.img) Lampa.Background.change(element.img);
+                });
+
+                // --- INTERACTION: ACTIONS ---
+                card.on('hover:enter', function () {
+                    _this.showMenu(element);
+                });
+
+                // --- UX: CONTEXT MENU (Long Press) ---
+                card.on('hover:long', function () {
+                    Lampa.ContextMenu.show({
+                        item: Lampa.Template.get('items_line_card', element), // фиктивный item для контекста
+                        onSelect: function (a) {
+                           // Здесь можно прикрутить стандартные действия
+                           // Но пока просто продублируем меню
+                           _this.showMenu(element);
                         }
                     });
-                    break;
-                }
-            }
-            if(state.page == 1) ui.body.empty();
-            if(items.length) { 
-                if(state.page > 1) state.items = state.items.concat(items);
-                else state.items = items;
-                this.build(items, true); 
-            } else Lampa.Noty.show(state.page == 1 ? 'Пусто' : 'Конец');
-            this.activity.loader(false);
-        };
-
-        comp.build = function(items, more) {
-            ui.body.find('.selector_next').remove();
-            items.forEach(function(it) {
-                var card = Lampa.Template.get('card', { title: it.title, release_year: '' });
-                card.addClass('card--vertical');
-                card.find('img').attr('src', it.img);
-                card.on('hover:enter', function() { comp.open(it); });
-                ui.body.append(card);
-            });
-            if(more && state.mode !== 'favs') {
-                var btn = $('<div class="selector selector_next" style="padding: 20px; text-align: center;">Далее</div>');
-                btn.on('hover:enter', function() { state.page++; comp.load(); });
-                ui.body.append(btn);
-            }
-            this.activity.toggle();
-        };
-
-        comp.open = function(it) {
-            Lampa.Select.show({
-                title: it.title,
-                items: [{title: 'Смотреть', id: 1}, {title: 'В избранное', id: 2}],
-                onSelect: function(a) {
-                    if(a.id == 2) {
-                        var favs = SETTINGS.get('favorites', []);
-                        favs.push(it); SETTINGS.set('favorites', favs);
-                        Lampa.Noty.show('Добавлено');
-                    }
-                    if(a.id == 1) {
-                        Lampa.Loading.start(function() {
-                            var p = SETTINGS.get('proxy', 'https://corsproxy.io/?');
-                            network.silent(p + encodeURIComponent(it.url), function(s) {
-                                Lampa.Loading.stop();
-                                var d = new DOMParser().parseFromString(s, "text/html");
-                                var f = d.querySelector('iframe');
-                                if(f) Lampa.Player.play({url: f.src, title: it.title});
-                                else Lampa.Noty.show('Плеер не найден');
-                            });
-                        });
-                    }
-                }
-            });
-        };
-        return comp;
-    }
-
-    function init() {
-        Lampa.Component.add('dunhuatv', Component);
-        
-        // 1. Метод встраивания из плагина MODS (Самый надежный)
-        var btn = Lampa.Template.get('menu_item', {
-            title: MANIFEST.name,
-            icon: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="24" height="24"><path d="M4 6H2v14c0 1.1.9 2 2 2h14v-2H4V6zm16-4H8c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-8 12.5v-9l6 4.5-6 4.5z"/></svg>'
-        });
-        
-        btn.on('hover:enter', function() {
-            Lampa.Activity.push({ url: '', title: MANIFEST.name, component: 'dunhuatv', page: 1 });
-        });
-
-        // Добавляем в настройки плагинов (Резерв)
-        Lampa.Settings.listener.follow('open', function(e) {
-            if(e.name == 'plugins') {
-                var field = Lampa.Template.get('settings_param', { name: 'Дунхуа ТВ', value: 'Настроить прокси', desc: 'Управление плагином' });
-                field.on('hover:enter', function() {
-                    Lampa.Input.edit({ title: 'Прокси', value: SETTINGS.get('proxy', 'https://corsproxy.io/?'), free: true }, function(v) { SETTINGS.set('proxy', v); });
                 });
-                e.body.find('.settings__content').append(field);
-            }
-        });
 
-        // Основной цикл встраивания
-        function insert() {
-            var menu = $('.menu .menu__list');
-            if(menu.length) {
-                if(menu.find('.dunhua-plugin-btn').length == 0) {
-                    btn.addClass('dunhua-plugin-btn');
-                    menu.prepend(btn); // Вставляем в САМЫЙ ВЕРХ
+                scroll.append(card);
+                items.push(card);
+            });
+        };
+
+        this.showMenu = function (element) {
+            var _this = this;
+            var menu = [
+                {
+                    title: 'Смотреть',
+                    mark: true,
+                    action: function () {
+                        _this.parseVideo(element.url, element.title);
+                    }
+                },
+                {
+                    title: this.isFavorite(element) ? 'Убрать из избранного' : 'В избранное',
+                    action: function () {
+                        _this.toggleFavorite(element);
+                    }
+                },
+                {
+                    title: 'Очистить фон',
+                    action: function() {
+                         Lampa.Background.immediately('');
+                    }
                 }
+            ];
+
+            Lampa.Select.show({
+                title: element.title,
+                items: menu,
+                onSelect: function (a) {
+                    a.action();
+                }
+            });
+        };
+
+        // --- УЛУЧШЕННЫЙ ПАРСЕР ВИДЕО ---
+        this.parseVideo = function (url, title) {
+            var _this = this;
+            Lampa.Loading.start(function () { Lampa.Loading.stop(); });
+
+            // Получаем только путь от URL, если он полный
+            var path = url.replace(mirrors[current_mirror_index], '').replace(DunhuaStorage.get('proxy') || default_proxy, '');
+            if(path.indexOf('http') === 0) path = url; // Если это абсолютная ссылка
+
+            smartRequest(path, function (html) {
+                Lampa.Loading.stop();
+                var doc = (new DOMParser()).parseFromString(html, "text/html");
+                var sources = [];
+
+                // 1. Поиск плейлистов в табах (обычная история для DLE)
+                // Ищем заголовки табов
+                var tabs_titles = [];
+                $(doc).find('.tabs .tab, .xf_playlists li, .nav-tabs li').each(function(){
+                    tabs_titles.push($(this).text().trim());
+                });
+
+                // Ищем контент табов (iframe внутри)
+                var tabs_content = $(doc).find('.tabs_content, .tab-content .tab-pane, .xf_playlists_content .box');
+                
+                if(tabs_content.length > 0) {
+                     tabs_content.each(function(index){
+                         var name = tabs_titles[index] || ('Источник ' + (index + 1));
+                         var frame = $(this).find('iframe').attr('src') || $(this).find('iframe').attr('data-src');
+                         if(frame) {
+                             sources.push({
+                                 title: name,
+                                 url: frame
+                             });
+                         }
+                     });
+                }
+
+                // 2. Если табы не найдены, ищем просто iframe
+                if (sources.length === 0) {
+                    $(doc).find('iframe').each(function(){
+                        var src = $(this).attr('src') || $(this).attr('data-src');
+                        if(src) {
+                             var name = 'Основной плеер';
+                             // Пытаемся угадать название по домену
+                             if(src.indexOf('kodik') > -1) name = 'Kodik';
+                             if(src.indexOf('sibnet') > -1) name = 'Sibnet';
+                             if(src.indexOf('youtube') > -1) name = 'YouTube';
+                             
+                             sources.push({
+                                 title: name,
+                                 url: src
+                             });
+                        }
+                    });
+                }
+
+                // 3. Похожие (Similars) - просто парсим, если найдем
+                // Реализуем как уведомление, что можно найти в поиске, или добавим позже
+                
+                if (sources.length > 0) {
+                    _this.play(sources, title, url); // Передаем URL страницы для генерации ID
+                } else {
+                    Lampa.Noty.show('Видео не найдено на странице');
+                }
+
+            }, function () {
+                Lampa.Loading.stop();
+                Lampa.Noty.show('Ошибка загрузки страницы');
+            });
+        };
+
+        this.play = function (links, title, page_url) {
+            var _this = this;
+            
+            // Функция запуска плеера
+            var startPlayer = function(link_obj) {
+                var video_url = link_obj.url;
+                if(video_url.indexOf('http') === -1) video_url = 'https:' + video_url;
+
+                var video = {
+                    title: title,
+                    url: video_url,
+                    // Интеграция с History/Timeline
+                    id: generateId(page_url), 
+                    source: 'dunhuatv',
+                    season: 1, // заглушка
+                    episode: 1, // заглушка
+                    timeline: {
+                        title: title,
+                        // Указываем исходный URL как ID для сохранения прогресса
+                        hash: generateId(page_url) 
+                    }
+                };
+
+                Lampa.Player.play(video);
+                
+                // Добавляем в локальную историю Lampa
+                var history = new Lampa.History();
+                history.add(video);
+            };
+
+            if(links.length === 1){
+                 startPlayer(links[0]);
             } else {
-                setTimeout(insert, 500);
+                Lampa.Select.show({
+                    title: 'Выбор источника',
+                    items: links.map(function(l){
+                        l.action = function(){ startPlayer(l); };
+                        return l;
+                    }),
+                    onSelect: function(a){
+                        a.action();
+                    }
+                });
             }
-        }
-        insert();
+        };
+
+
+        // --- ИЗБРАННОЕ ---
+        this.openFavorites = function () {
+            scroll.empty();
+            items = [];
+            var favs = DunhuaStorage.get('favs');
+            if (favs) {
+                this.append(favs);
+            } else {
+                this.empty('Список избранного пуст');
+            }
+        };
+
+        this.isFavorite = function (element) {
+            var favs = DunhuaStorage.get('favs') || [];
+            return favs.some(function (f) { return f.url === element.url; });
+        };
+
+        this.toggleFavorite = function (element) {
+            var favs = DunhuaStorage.get('favs') || [];
+            var exists = favs.findIndex(function (f) { return f.url === element.url; });
+
+            if (exists !== -1) {
+                favs.splice(exists, 1);
+                Lampa.Noty.show('Удалено из избранного');
+            } else {
+                favs.push(element);
+                Lampa.Noty.show('Добавлено в избранное');
+            }
+            DunhuaStorage.set('favs', favs);
+        };
+
+        // --- НАСТРОЙКИ ---
+        this.openSettings = function () {
+            Lampa.Input.edit({
+                title: 'Настройка Proxy',
+                value: DunhuaStorage.get('proxy') || default_proxy,
+                free: true,
+                nosave: true
+            }, function (new_proxy) {
+                DunhuaStorage.set('proxy', new_proxy);
+                Lampa.Noty.show('Proxy сохранен.');
+            });
+        };
+
+        this.loading = function (status) {
+            if (status) this.activity.loader(true);
+            else this.activity.loader(false);
+        };
+
+        this.empty = function (msg) {
+            scroll.append(Lampa.Template.get('empty', {
+                title: msg || 'Пусто',
+                descr: 'Ничего не найдено'
+            }));
+        };
+
+        this.destroy = function () {
+            scroll.empty();
+            items = [];
+        };
     }
 
-    if(window.appready) init();
-    else Lampa.Listener.follow('app', function(e) { if(e.type == 'ready') init(); });
+    // --- ИНИЦИАЛИЗАЦИЯ ---
+    function startPlugin() {
+        window.plugin_dunhuatv_ready = true;
+        Lampa.Component.add('dunhuatv', DunhuaTV);
+
+        // 1. Добавляем кнопку в боковое меню
+        var button = $('<li class="menu__item selector" data-action="dunhua"><div class="menu__ico"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 2L2 7L12 12L22 7L12 2Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M2 17L12 22L22 17" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M2 12L12 17L22 12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></div><div class="menu__text">Дунхуа</div></li>');
+
+        button.on('hover:enter', function () {
+            Lampa.Activity.push({
+                url: '',
+                title: 'Дунхуа ТВ',
+                component: 'dunhuatv',
+                page: 1
+            });
+        });
+
+        $('.menu .menu__list').eq(0).append(button);
+
+        // 2. Глобальный поиск: Регистрируем провайдер
+        Lampa.Search.addSource({
+            title: 'Дунхуа ТВ',
+            search: function(query, callback) {
+                 // Используем smartRequest для поиска
+                 var path = '/index.php?do=search&subaction=search&story=' + encodeURIComponent(query);
+                 smartRequest(path, function(html){
+                     var cards = Parser.getCards(html);
+                     // Преобразуем формат для глобального поиска Lampa
+                     var results = cards.map(function(card){
+                         card.type = 'anime'; // чтобы лампа знала тип
+                         return card;
+                     });
+                     callback(results);
+                 }, function(){
+                     callback([]); // Если ошибка, возвращаем пустоту
+                 });
+            }
+        });
+    }
+
+    if (window.appready) startPlugin();
+    else {
+        Lampa.Listener.follow('app', function (e) {
+            if (e.type == 'ready') startPlugin();
+        });
+    }
+
 })();
