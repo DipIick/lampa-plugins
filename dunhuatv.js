@@ -4,6 +4,7 @@
     if (window.dunhuatv_plugin) return;
     window.dunhuatv_plugin = true;
 
+    // corsproxy.io обычно самый надежный для таких сайтов
     var default_proxy = 'https://corsproxy.io/?';
     
     var mirrors = [
@@ -81,12 +82,18 @@
                 return [];
             }
 
-            // --- СТРАТЕГИЯ 1: Точное совпадение со скриншотом ---
+            // --- ОБНОВЛЕНО ПОД СКРИНШОТ ---
+            // Ищем .item-poster (корневой элемент карточки)
             var elements = $(doc).find('.item-poster'); 
 
-            // Если пусто, пробуем более общие селекторы
+            // Если по классу не нашли, пробуем по сетке
             if(elements.length === 0) {
-                 elements = $(doc).find('.grid-item, .custom-item, .shortstory, .item, .card, .th-item');
+                 elements = $(doc).find('.grid-items > div');
+            }
+            
+            // Если совсем пусто, пробуем старые классы
+            if(elements.length === 0) {
+                 elements = $(doc).find('.custom-item, .shortstory, .item, .card');
             }
 
             console.log('[DunhuaTV] Found elements:', elements.length);
@@ -94,40 +101,31 @@
             elements.each(function () {
                 var el = $(this);
                 
-                // 1. Ссылка и Заголовок (item_title со скриншота)
-                // Ищем тег A с классом item_title или внутри него
+                // 1. Ссылка и Заголовок
+                // На скрине ссылка имеет класс .item_title
                 var linkEl = el.find('a.item_title').first();
-                
-                // Если не нашли, ищем любой тег A внутри заголовка
                 if (linkEl.length === 0) linkEl = el.find('.item_title a').first();
-                // Фолбэк на просто ссылку
                 if (linkEl.length === 0) linkEl = el.find('a').first();
 
                 var link = linkEl.attr('href');
-                var title = linkEl.text().trim() || linkEl.attr('title') || el.find('.item_title').text().trim();
+                var title = linkEl.text().trim() || linkEl.attr('title');
 
-                // 2. Картинка (item_media со скриншота)
+                // 2. Картинка (Самое важное изменение)
+                // На скрине картинка в style="background-image:..." у класса .img-block
                 var img = '';
-                var mediaEl = el.find('.item_media, .img-block, .image-box');
+                var imgBlock = el.find('.img-block');
                 
-                // Проверяем img внутри media блока
-                if(mediaEl.length > 0) {
-                    var imgTag = mediaEl.find('img').first();
-                    img = imgTag.attr('src') || imgTag.attr('data-src') || imgTag.attr('data-original');
-                    
-                    // Проверяем background-image на media блоке (часто в DLE)
-                    if(!img) {
-                         var style = mediaEl.attr('style');
-                         if(style && style.match(/url\((.*?)\)/)){
-                             img = style.match(/url\((.*?)\)/)[1].replace(/['"]/g,'');
-                         }
+                if (imgBlock.length > 0) {
+                    var style = imgBlock.attr('style');
+                    if (style && style.match(/url\((.*?)\)/)) {
+                        img = style.match(/url\((.*?)\)/)[1].replace(/['"]/g, '');
                     }
                 }
 
-                // Фолбэк: ищем просто картинку в элементе
-                if(!img) {
-                    var simpleImg = el.find('img').first();
-                    img = simpleImg.attr('src') || simpleImg.attr('data-src');
+                // Если в .img-block нет, ищем просто img тег
+                if (!img) {
+                    var imgTag = el.find('img').first();
+                    img = imgTag.attr('src') || imgTag.attr('data-src');
                 }
                 
                 // 3. Мета-информация
@@ -136,7 +134,7 @@
                 var status = el.find('.status, .date, .item_meta').text().trim() || '';
 
                 if (link && title) {
-                    // Фикс путей
+                    // Исправление путей
                     if (link.indexOf('http') === -1) {
                         if (link.indexOf('/') !== 0) link = '/' + link;
                         link = site_url + link;
@@ -151,7 +149,6 @@
                         img = './img/img_broken.svg';
                     }
 
-                    // Фильтрация мусора
                     if (link.indexOf('/user/') === -1 && link.indexOf('/tags/') === -1) {
                         cards.push({
                             title: title,
@@ -166,7 +163,7 @@
                 }
             });
             
-            // Удаление дубликатов
+            // Фильтрация дублей
             var uniqueCards = [];
             var seenUrls = new Set();
             cards.forEach(function(c){
@@ -401,6 +398,7 @@
                 var doc = (new DOMParser()).parseFromString(html, "text/html");
                 var sources = [];
 
+                // 1. Ищем табы (стандарт DLE)
                 var tabs_titles = [];
                 $(doc).find('.tabs .tab, .xf_playlists li, .nav-tabs li, .kino-lines li').each(function(){
                     tabs_titles.push($(this).text().trim());
@@ -418,6 +416,7 @@
                      });
                 }
 
+                // 2. Ищем явные iframe
                 if (sources.length === 0) {
                     $(doc).find('iframe').each(function(){
                         var src = $(this).attr('src') || $(this).attr('data-src');
@@ -429,11 +428,37 @@
                         }
                     });
                 }
+                
+                // 3. Сканируем скрипты на наличие ссылок (для сайтов с JS плеерами)
+                if (sources.length === 0) {
+                    var script_text = $(doc).text();
+                    // Ищем ссылки похожие на видео-эмбеды
+                    var embed_regex = /https?:\/\/[a-zA-Z0-9\-\.]+\/(embed|video|iframe|serial|movie)\/[a-zA-Z0-9\-\_\=\?\&]+/g;
+                    var matches = html.match(embed_regex);
+                    if(matches){
+                        matches.forEach(function(match){
+                            // Фильтруем мусор
+                            if(match.indexOf('.js') === -1 && match.indexOf('.css') === -1 && match.indexOf('dunhuatv.ru') === -1){
+                                sources.push({title: 'Найден в скриптах', url: match});
+                            }
+                        });
+                    }
+                }
 
                 if (sources.length > 0) {
-                    _this.play(sources, title, url);
+                    // Удаляем дубликаты источников
+                    var uniqueSources = [];
+                    var seenSrc = new Set();
+                    sources.forEach(function(s){
+                        if(!seenSrc.has(s.url)){
+                            seenSrc.add(s.url);
+                            uniqueSources.push(s);
+                        }
+                    });
+                    
+                    _this.play(uniqueSources, title, url);
                 } else {
-                    Lampa.Noty.show('Видео не найдено на странице');
+                    Lampa.Noty.show('Видео не найдено. Возможно нужна авторизация на сайте.');
                 }
 
             }, function () {
