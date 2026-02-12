@@ -4,9 +4,7 @@
     if (window.dunhuatv_plugin) return;
     window.dunhuatv_plugin = true;
 
-    // corsproxy.io обычно самый надежный для таких сайтов
-    var default_proxy = 'https://corsproxy.io/?';
-    
+    // Список зеркал сайта
     var mirrors = [
         'https://dunhuatv.ru',
         'https://www.dunhuatv.ru' 
@@ -36,38 +34,63 @@
         return Math.abs(hash);
     }
 
+    // Умный запрос с авто-перебором прокси (Auto-Rotation)
     function smartRequest(path, callback, error_callback) {
         var network = new Lampa.Reguest();
-        var proxy = DunhuaStorage.get('proxy') || default_proxy;
         var base_url = mirrors[current_mirror_index];
         var final_url = base_url + path;
-        var fetch_url = '';
 
-        if (proxy.indexOf('allorigins') > -1) {
-            fetch_url = proxy + encodeURIComponent(final_url);
-        } else if (proxy.indexOf('corsproxy.io') > -1) {
-            fetch_url = proxy + final_url;
-        } else if (proxy.slice(-1) === '=') {
-            fetch_url = proxy + encodeURIComponent(final_url);
-        } else if (proxy.slice(-1) === '/') {
-            fetch_url = proxy + final_url;
-        } else {
-            fetch_url = proxy + '/' + final_url;
+        // Встроенный пул прокси
+        var proxies = [
+            'https://corsproxy.io/?',
+            'https://api.allorigins.win/raw?url=',
+            'https://cors.zmov.ru/?',
+            'https://cors.appitems.ru/?'
+        ];
+
+        // Если пользователь указал свой прокси в настройках, ставим его первым
+        var custom_proxy = DunhuaStorage.get('proxy');
+        if (custom_proxy) {
+            proxies.unshift(custom_proxy);
         }
 
-        console.log('[DunhuaTV] Request:', fetch_url);
+        function tryProxy(index) {
+            if (index >= proxies.length) {
+                console.log('[DunhuaTV] All proxies failed.');
+                if (error_callback) error_callback('All proxies failed');
+                return;
+            }
 
-        network.silent(fetch_url, function(result){
-            try {
-                var json = JSON.parse(result);
-                if (json.contents) result = json.contents;
-            } catch (e) {}
-            callback(result);
-        }, function(a, c){
-            if(error_callback) error_callback(a, c);
-        }, false, {
-            dataType: 'text'
-        });
+            var proxy = proxies[index];
+            var fetch_url = proxy + (proxy.slice(-1) === '=' ? encodeURIComponent(final_url) : final_url);
+
+            console.log('[DunhuaTV] Trying proxy:', fetch_url);
+
+            network.silent(fetch_url, function(result){
+                // Проверяем, не подсунул ли прокси JSON (allorigins без raw)
+                try {
+                    var json = JSON.parse(result);
+                    if (json.contents) result = json.contents;
+                } catch (e) {}
+
+                // Проверка на заглушки защиты (Cloudflare / DDOS-GUARD)
+                if (!result || result.indexOf('Cloudflare') > -1 || result.indexOf('Just a moment') > -1 || result.indexOf('DDOS-GUARD') > -1) {
+                    console.log('[DunhuaTV] Blocked by CF/DDoS on proxy ' + index + '. Switching...');
+                    tryProxy(index + 1);
+                } else {
+                    // Успешно!
+                    callback(result);
+                }
+            }, function(a, c){
+                console.log('[DunhuaTV] Network error on proxy ' + index + '. Switching...');
+                tryProxy(index + 1);
+            }, false, {
+                dataType: 'text',
+                timeout: 10000 // таймаут 10 сек на каждый прокси
+            });
+        }
+
+        tryProxy(0);
     }
 
     var Parser = {
@@ -76,24 +99,12 @@
             var cards = [];
             var site_url = mirrors[current_mirror_index];
 
-            var pageTitle = $(doc).find('title').text();
-            if (pageTitle.includes('Cloudflare') || pageTitle.includes('DDOS-GUARD') || pageTitle.includes('Just a moment')) {
-                Lampa.Noty.show('Сайт защищен. Смените прокси.');
-                return [];
-            }
+            // Основной поиск по структуре со скриншота (div.item-poster или .grid-items__item)
+            var elements = $(doc).find('div.item-poster, .grid-items_item, .grid-items__item');
 
-            // --- ОБНОВЛЕНО ПОД СКРИНШОТ ---
-            // Ищем .item-poster (корневой элемент карточки)
-            var elements = $(doc).find('.item-poster'); 
-
-            // Если по классу не нашли, пробуем по сетке
+            // Резервный поиск, если классы изменились
             if(elements.length === 0) {
-                 elements = $(doc).find('.grid-items > div');
-            }
-            
-            // Если совсем пусто, пробуем старые классы
-            if(elements.length === 0) {
-                 elements = $(doc).find('.custom-item, .shortstory, .item, .card');
+                 elements = $(doc).find('.custom-item, .shortstory, #dle-content > div.item');
             }
 
             console.log('[DunhuaTV] Found elements:', elements.length);
@@ -102,27 +113,28 @@
                 var el = $(this);
                 
                 // 1. Ссылка и Заголовок
-                // На скрине ссылка имеет класс .item_title
-                var linkEl = el.find('a.item_title').first();
-                if (linkEl.length === 0) linkEl = el.find('.item_title a').first();
-                if (linkEl.length === 0) linkEl = el.find('a').first();
-
-                var link = linkEl.attr('href');
-                var title = linkEl.text().trim() || linkEl.attr('title');
-
-                // 2. Картинка (Самое важное изменение)
-                // На скрине картинка в style="background-image:..." у класса .img-block
-                var img = '';
-                var imgBlock = el.find('.img-block');
-                
-                if (imgBlock.length > 0) {
-                    var style = imgBlock.attr('style');
-                    if (style && style.match(/url\((.*?)\)/)) {
-                        img = style.match(/url\((.*?)\)/)[1].replace(/['"]/g, '');
-                    }
+                var linkEl = el.find('a.item_title, .item_title a, h2 a');
+                if (linkEl.length === 0) {
+                    // Ищем любую ссылку, которая не является картинкой
+                    linkEl = el.find('a').not('.img-block, .item-poster');
                 }
 
-                // Если в .img-block нет, ищем просто img тег
+                var link = linkEl.first().attr('href');
+                var title = linkEl.first().text().trim() || linkEl.first().attr('title');
+
+                if (!link) return; // Пропускаем кривые элементы
+
+                // 2. Картинка (Парсинг background-image со скрина)
+                var img = '';
+                var imgBlock = el.find('a.img-block, div.img-block, .item-poster.img-block, .image-box');
+                
+                var style = imgBlock.attr('style') || el.attr('style');
+                if (style && style.indexOf('url(') > -1) {
+                    var match = style.match(/url\(['"]?(.*?)['"]?\)/);
+                    if (match) img = match[1].replace(/&quot;/g, '');
+                }
+
+                // Резервный поиск через тег img
                 if (!img) {
                     var imgTag = el.find('img').first();
                     img = imgTag.attr('src') || imgTag.attr('data-src');
@@ -134,21 +146,15 @@
                 var status = el.find('.status, .date, .item_meta').text().trim() || '';
 
                 if (link && title) {
-                    // Исправление путей
-                    if (link.indexOf('http') === -1) {
-                        if (link.indexOf('/') !== 0) link = '/' + link;
-                        link = site_url + link;
-                    }
-                    
+                    // Нормализация путей
+                    if (link.indexOf('http') === -1) link = site_url + (link.indexOf('/') === 0 ? '' : '/') + link;
                     if (img) {
-                        if (img.indexOf('http') === -1) {
-                            if (img.indexOf('/') !== 0) img = '/' + img;
-                            img = site_url + img;
-                        }
+                        if (img.indexOf('http') === -1) img = site_url + (img.indexOf('/') === 0 ? '' : '/') + img;
                     } else {
                         img = './img/img_broken.svg';
                     }
 
+                    // Исключаем мусор (теги, профили)
                     if (link.indexOf('/user/') === -1 && link.indexOf('/tags/') === -1) {
                         cards.push({
                             title: title,
@@ -163,7 +169,7 @@
                 }
             });
             
-            // Фильтрация дублей
+            // Фильтрация дубликатов по URL
             var uniqueCards = [];
             var seenUrls = new Set();
             cards.forEach(function(c){
@@ -285,23 +291,25 @@
             smartRequest(path, function(html){
                 _this.loading(false);
                 active_request = false;
-                _this.parse(html);
+                
+                var cards = Parser.getCards(html);
+                if (cards.length > 0) {
+                    _this.append(cards);
+                    page++;
+                } else {
+                    if (page === 1) {
+                        // Выводим заголовок страницы для отладки, если карточки не найдены
+                        var doc = (new DOMParser()).parseFromString(html, "text/html");
+                        var debugTitle = $(doc).find('title').text() || 'Неизвестная ошибка парсинга';
+                        _this.empty('Пусто. Заголовок сайта: ' + debugTitle);
+                    }
+                }
             }, function(e){
                 _this.loading(false);
                 active_request = false;
-                Lampa.Noty.show('Ошибка сети. Проверьте консоль и настройки Proxy.');
+                _this.empty('Все прокси недоступны. Ошибка сети.');
+                Lampa.Noty.show('Все прокси-сервера не ответили.');
             });
-        };
-
-        this.parse = function (html) {
-            var cards = Parser.getCards(html);
-            
-            if (cards.length > 0) {
-                this.append(cards);
-                page++;
-            } else {
-                if(page === 1) this.empty();
-            }
         };
 
         this.append = function (data) {
@@ -386,19 +394,14 @@
             Lampa.Loading.start(function () { Lampa.Loading.stop(); });
 
             var path = url.replace(mirrors[current_mirror_index], '');
-            var proxy = DunhuaStorage.get('proxy') || default_proxy;
+            if(path.indexOf('http') === 0) path = url; // fallback
             
-            if(path.indexOf(proxy) === 0) path = path.replace(proxy, '');
-            if(path.indexOf('http') === 0 && path.indexOf(mirrors[current_mirror_index]) > -1) {
-                 path = path.replace(mirrors[current_mirror_index], '');
-            }
-
             smartRequest(path, function (html) {
                 Lampa.Loading.stop();
                 var doc = (new DOMParser()).parseFromString(html, "text/html");
                 var sources = [];
 
-                // 1. Ищем табы (стандарт DLE)
+                // 1. Ищем табы DLE (Озвучки / Сезоны)
                 var tabs_titles = [];
                 $(doc).find('.tabs .tab, .xf_playlists li, .nav-tabs li, .kino-lines li').each(function(){
                     tabs_titles.push($(this).text().trim());
@@ -416,37 +419,34 @@
                      });
                 }
 
-                // 2. Ищем явные iframe
+                // 2. Ищем любые iframe на странице напрямую
                 if (sources.length === 0) {
                     $(doc).find('iframe').each(function(){
                         var src = $(this).attr('src') || $(this).attr('data-src');
-                        if(src) {
-                             var name = 'Основной плеер';
+                        if(src && src.indexOf('dunhuatv.ru') === -1) { // исключаем локальные фреймы
+                             var name = 'Плеер ' + (sources.length + 1);
                              if(src.indexOf('kodik') > -1) name = 'Kodik';
                              if(src.indexOf('sibnet') > -1) name = 'Sibnet';
+                             if(src.indexOf('vk.com') > -1) name = 'VK Video';
                              sources.push({ title: name, url: src });
                         }
                     });
                 }
-                
-                // 3. Сканируем скрипты на наличие ссылок (для сайтов с JS плеерами)
+
+                // 3. Глобальный поиск фреймов и ссылок регуляркой по всему HTML (супер-фоллбэк для JS-плееров)
                 if (sources.length === 0) {
-                    var script_text = $(doc).text();
-                    // Ищем ссылки похожие на видео-эмбеды
-                    var embed_regex = /https?:\/\/[a-zA-Z0-9\-\.]+\/(embed|video|iframe|serial|movie)\/[a-zA-Z0-9\-\_\=\?\&]+/g;
-                    var matches = html.match(embed_regex);
-                    if(matches){
-                        matches.forEach(function(match){
-                            // Фильтруем мусор
-                            if(match.indexOf('.js') === -1 && match.indexOf('.css') === -1 && match.indexOf('dunhuatv.ru') === -1){
-                                sources.push({title: 'Найден в скриптах', url: match});
-                            }
-                        });
+                    var iframeRegex = /<iframe[^>]+src=['"]([^'"]+)['"]/gi;
+                    var match;
+                    while ((match = iframeRegex.exec(html)) !== null) {
+                        var src = match[1];
+                        if (src.indexOf('dunhuatv.ru') === -1 && src.indexOf('yandex') === -1 && src.indexOf('google') === -1) {
+                            sources.push({ title: 'Найден плеер (Regex)', url: src });
+                        }
                     }
                 }
 
                 if (sources.length > 0) {
-                    // Удаляем дубликаты источников
+                    // Удаляем дубликаты
                     var uniqueSources = [];
                     var seenSrc = new Set();
                     sources.forEach(function(s){
@@ -458,7 +458,7 @@
                     
                     _this.play(uniqueSources, title, url);
                 } else {
-                    Lampa.Noty.show('Видео не найдено. Возможно нужна авторизация на сайте.');
+                    Lampa.Noty.show('Видео не найдено на странице');
                 }
 
             }, function () {
@@ -541,8 +541,8 @@
 
         this.openSettings = function () {
             Lampa.Input.edit({
-                title: 'Настройка Proxy',
-                value: DunhuaStorage.get('proxy') || default_proxy,
+                title: 'Свой Proxy (оставьте пустым для авто-выбора)',
+                value: DunhuaStorage.get('proxy') || '',
                 free: true,
                 nosave: true
             }, function (new_proxy) {
@@ -559,7 +559,7 @@
         this.empty = function (msg) {
             scroll.append(Lampa.Template.get('empty', {
                 title: msg || 'Пусто',
-                descr: 'Ничего не найдено (или ошибка парсинга)'
+                descr: 'Ничего не найдено'
             }));
         };
 
