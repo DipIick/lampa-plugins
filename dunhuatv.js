@@ -26,13 +26,16 @@
         var network = new Lampa.Reguest();
         var url = site_url + path;
         var custom_proxy = DunhuaStorage.get('proxy');
+        var ts = '?t=' + new Date().getTime();
+        
         var proxies = custom_proxy ? [custom_proxy] : [
+            'https://api.codetabs.com/v1/proxy?quest=',
             'https://corsproxy.io/?',
             'https://api.allorigins.win/get?url=',
-            'https://cors.ygg.workers.dev/?'
+            'https://cors.appitems.ru/?'
         ];
 
-        network.silent(url, function(html) {
+        network.silent(url + (url.indexOf('?') > -1 ? '&t=' : '?t=') + new Date().getTime(), function(html) {
             onSuccess(html);
         }, function() {
             tryProxies(0);
@@ -46,7 +49,8 @@
 
             var proxy = proxies[index];
             var fetch_url = proxy + encodeURIComponent(url);
-            if (proxy.indexOf('corsproxy.io') > -1 || proxy.indexOf('workers.dev') > -1) {
+            
+            if (proxy.indexOf('corsproxy.io') > -1 || proxy.indexOf('codetabs.com') > -1 || proxy.indexOf('appitems') > -1) {
                 fetch_url = proxy + url;
             }
 
@@ -72,13 +76,12 @@
 
     var Parser = {
         getCards: function(html) {
-            var cleanHtml = html.replace(/<img/g, '<noload').replace(/<script/g, '<noscript');
-            var doc = $('<div>' + cleanHtml + '</div>');
+            var doc = new DOMParser().parseFromString(html, "text/html");
             var cards = [];
 
-            var elements = doc.find('.item-poster, .grid-items__item, .custom-item, .shortstory');
+            var elements = $(doc).find('.item-poster, .grid-items__item, .custom-item, .shortstory');
             if (elements.length === 0) {
-                elements = doc.find('.grid-items > div, #dle-content > div, .sect__content > div, .grid-item');
+                elements = $(doc).find('.grid-items > div, #dle-content > div, .sect__content > div, .grid-item');
             }
 
             elements.each(function () {
@@ -105,7 +108,7 @@
                 }
 
                 if (!img) {
-                    var imgTag = el.find('noload').first();
+                    var imgTag = el.find('img').first();
                     img = imgTag.attr('src') || imgTag.attr('data-src') || imgTag.attr('data-original');
                 }
 
@@ -131,22 +134,24 @@
             });
 
             if (cards.length === 0) {
-                var regex = /<a[^>]+href=["'](https:\/\/dunhuatv\.ru\/[^"']+?)["'][^>]*>(.*?)<\/a>/g;
-                var match;
-                while ((match = regex.exec(html)) !== null) {
-                    var rLink = match[1];
-                    var rTitle = match[2].replace(/<[^>]+>/g, '').trim();
-                    if (rLink.indexOf('/user/') === -1 && rLink.indexOf('/tags/') === -1 && rTitle.length > 2 && rTitle.length < 100) {
+                $(doc).find('a').each(function() {
+                    var a = $(this);
+                    var rLink = a.attr('href');
+                    var rTitle = a.text().trim() || a.attr('title');
+                    var imgTag = a.find('img').first();
+                    var rImg = imgTag.attr('src') || imgTag.attr('data-src') || './img/img_broken.svg';
+                    
+                    if (rLink && rLink.indexOf('dunhuatv.ru') > -1 && rTitle.length > 2 && rTitle.length < 100 && rLink.indexOf('/user/') === -1 && rLink.indexOf('/tags/') === -1 && imgTag.length > 0) {
                         cards.push({
                             title: rTitle,
-                            img: './img/img_broken.svg',
+                            img: rImg,
                             url: rLink,
                             quality: '',
                             rating: '',
                             status: ''
                         });
                     }
-                }
+                });
             }
 
             return cards.filter(function(v, i, a) {
@@ -334,16 +339,15 @@
             
             fetchContent(path, function (html) {
                 Lampa.Loading.stop();
-                var cleanHtml = html.replace(/<img/g, '<noload').replace(/<script/g, '<noscript');
-                var doc = $('<div>' + cleanHtml + '</div>');
+                var doc = new DOMParser().parseFromString(html, "text/html");
                 var sources = [];
 
                 var tabs_titles = [];
-                doc.find('.tabs .tab, .xf_playlists li, .nav-tabs li, .kino-lines li').each(function(){
+                $(doc).find('.tabs .tab, .xf_playlists li, .nav-tabs li, .kino-lines li').each(function(){
                     tabs_titles.push($(this).text().trim());
                 });
 
-                var tabs_content = doc.find('.tabs_content, .tab-content .tab-pane, .xf_playlists_content .box, .kino-lines .kino-box');
+                var tabs_content = $(doc).find('.tabs_content, .tab-content .tab-pane, .xf_playlists_content .box, .kino-lines .kino-box');
                 if(tabs_content.length > 0) {
                      tabs_content.each(function(index){
                          var name = tabs_titles[index] || ('Источник ' + (index + 1));
@@ -353,7 +357,7 @@
                 }
 
                 if (sources.length === 0) {
-                    doc.find('iframe').each(function(){
+                    $(doc).find('iframe').each(function(){
                         var src = $(this).attr('src') || $(this).attr('data-src');
                         if(src && src.indexOf('dunhuatv.ru') === -1 && src.indexOf('yandex') === -1) {
                              var name = 'Плеер ' + (sources.length + 1);
