@@ -2,12 +2,12 @@
     'use strict';
 
     var Manifest = {
-        id: 'ph_plugin',
-        version: '1.0.2',
+        id: 'ph_plugin_reborn',
+        version: '1.0.5',
         name: 'PH',
-        description: 'Video plugin',
+        description: 'Video access',
         component: 'ph_component',
-        source: 'https://rt.pornhub.com',
+        source: 'https://www.pornhub.com',
         proxy: 'https://cors.eu.org/' 
     };
 
@@ -28,47 +28,79 @@
         request: function (url, success, error) {
             var proxy = DB.get('proxy', Manifest.proxy);
             var use_proxy = DB.get('use_proxy', true);
+            
+            // Формируем полный URL через прокси
             var final_url = (use_proxy && url.indexOf('http') === 0) ? proxy + url : url;
 
+            var params = {
+                dataType: 'text',
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Referer': Manifest.source + '/'
+                }
+            };
+
             Network.silent(final_url, function (str) {
+                // Проверка на капчу или блокировку
+                if (str.indexOf('captcha') > -1 || str.indexOf('human verification') > -1) {
+                    Lampa.Noty.show('PH: Captcha detected (Try changing Proxy)');
+                }
                 success(str);
             }, function (a, c) {
-                if(use_proxy) {
-                     Network.silent(url, success, error);
+                // Фоллбек: если прокси не сработал, пробуем второй популярный
+                if(use_proxy && proxy.indexOf('cors.eu.org') > -1) {
+                    Lampa.Noty.show('Proxy error. Retrying with fallback...');
+                    var fallback = 'https://api.codetabs.com/v1/proxy?quest=';
+                    Network.silent(fallback + url, success, error);
                 } else {
                     error(a, c);
                 }
-            });
+            }, params);
         },
         
         parseCatalog: function (html) {
             var doc = new DOMParser().parseFromString(html, 'text/html');
             var items = [];
-            var elements = doc.querySelectorAll('li.js-pop.videoblock, .pcVideoListItem, .videoblock'); 
+            
+            // Более надежный селектор: ищем обертку картинки, так как она есть всегда
+            var elements = doc.querySelectorAll('.phimage, .videoBox'); 
 
             elements.forEach(function (el) {
-                var linkEl = el.querySelector('.title a, .phimage a');
-                var imgEl = el.querySelector('img');
-                var titleEl = el.querySelector('.title a');
-                var durEl = el.querySelector('.duration');
-                var viewEl = el.querySelector('.views var');
+                // Поднимаемся к родительскому элементу (li или div), если нужно
+                var parent = el.closest('li') || el.closest('.pcVideoListItem') || el;
+                
+                var linkEl = parent.querySelector('a');
+                var imgEl = parent.querySelector('img');
+                var titleEl = parent.querySelector('.title a, .videoTitle, span.title');
+                var durEl = parent.querySelector('.duration, .marker-overlays');
+                var viewEl = parent.querySelector('.views, .views var');
 
                 if (linkEl && imgEl) {
-                    var img = imgEl.getAttribute('data-src') || imgEl.getAttribute('data-mediumthumb') || imgEl.getAttribute('src');
-                    var title = titleEl ? titleEl.getAttribute('title') || titleEl.innerText.trim() : 'Video';
+                    // Извлекаем картинку (у PH часто src - это заглушка, а реальная в data-src)
+                    var img = imgEl.getAttribute('data-src') || 
+                              imgEl.getAttribute('data-mediumthumb') || 
+                              imgEl.getAttribute('data-thumb_url') || 
+                              imgEl.getAttribute('src');
                     
+                    var title = titleEl ? (titleEl.getAttribute('title') || titleEl.innerText.trim()) : 'Video';
+                    
+                    // Очистка ссылки
+                    var link = linkEl.getAttribute('href');
+                    if(link.indexOf('viewkey') === -1 && link.indexOf('/video/') === -1) return; // Пропускаем мусор
+
                     items.push({
-                        url: linkEl.getAttribute('href'),
+                        url: link,
                         img: img,
                         title: title,
-                        quality: durEl ? durEl.innerText.trim() : '',
+                        quality: durEl ? durEl.innerText.trim() : 'HD',
                         year: viewEl ? viewEl.innerText.trim() : '',
                         type: 'video'
                     });
                 }
             });
 
-            var next_page = doc.querySelector('.pagination_next, .page_next a');
+            // Поиск следующей страницы
+            var next_page = doc.querySelector('.pagination_next a, .page_next a, #next');
             var page = next_page ? next_page.getAttribute('href') : false;
 
             return { list: items, page: page };
@@ -76,31 +108,49 @@
 
         parseFull: function (html) {
             var doc = new DOMParser().parseFromString(html, 'text/html');
-            var title = doc.querySelector('.inlineFree');
-            var desc = doc.querySelector('.video-metadata-description'); 
+            var title = doc.querySelector('.inlineFree') || doc.querySelector('h1.title');
+            var desc = doc.querySelector('.video-metadata-description, .description'); 
             var poster = doc.querySelector('#player-fluid-container img, .video-wrapper img');
             
             var video_urls = [];
             
-            var flashvarsMatch = html.match(/flashvars_\d+\s*=\s*({.+?});/);
+            // Метод 1: Поиск flashvars (Стандартный для PH)
+            var flashvarsMatch = html.match(/flashvars_\d+\s*=\s*({.+?});/) || html.match(/var\s+flashvars\s*=\s*({.+?});/);
             
             if (flashvarsMatch) {
                 try {
                     var json = JSON.parse(flashvarsMatch[1]);
                     if (json.mediaDefinitions) {
                         json.mediaDefinitions.forEach(function(media) {
-                            if (media.videoUrl && media.format === 'mp4') {
+                            if (media.videoUrl && (media.format === 'mp4' || media.format === 'hls')) {
                                 var q = media.quality;
                                 if(Array.isArray(q)) q = q[0]; 
                                 video_urls.push({
-                                    title: q + 'p',
-                                    quality: parseInt(q),
+                                    title: q + (isNaN(q) ? '' : 'p'),
+                                    quality: parseInt(q) || 0,
                                     url: media.videoUrl
                                 });
                             }
                         });
                     }
-                } catch (e) {}
+                } catch (e) { console.error('PH Parse JSON Error', e); }
+            }
+
+            // Метод 2: Поиск через regex qualityItems (для некоторых версий)
+            if (video_urls.length === 0) {
+                var qualityMatch = html.match(/"qualityItems":(\[.+?\])/);
+                if (qualityMatch) {
+                    try {
+                        var qItems = JSON.parse(qualityMatch[1]);
+                        qItems.forEach(function(item){
+                             video_urls.push({
+                                title: item.text,
+                                quality: parseInt(item.text) || 0,
+                                url: item.url
+                            });
+                        });
+                    } catch(e){}
+                }
             }
 
             video_urls.sort(function(a,b){ return b.quality - a.quality; });
@@ -159,7 +209,13 @@
             var requestUrl = this.url;
 
             API.request(requestUrl, function (html) {
+                // Если HTML слишком короткий - это подозрительно
+                if(html.length < 500) {
+                    Lampa.Noty.show('PH: Response too short. Check Proxy.');
+                }
+
                 var data = API.parseCatalog(html);
+                
                 _this.buildItems(data.list);
                 _this.activity.loader(false);
                 
@@ -169,9 +225,10 @@
                 } else {
                     _this.url = false;
                 }
-            }, function () {
+            }, function (a, c) {
                 _this.activity.loader(false);
                 _this.activity.empty();
+                Lampa.Noty.show('PH Network Error: ' + c);
             });
         };
 
@@ -179,7 +236,9 @@
             var _this = this;
             
             if(!items.length) {
-                Lampa.Noty.show('Empty');
+                // Если парсер вернул 0 элементов, но ошибки сети не было
+                var emptyMsg = Lampa.Template.get('empty', {title: 'No items found', descr: 'Parser failed or content blocked'});
+                this.activity.line.append(emptyMsg);
                 return;
             }
 
@@ -201,12 +260,13 @@
                 card.on('hover:enter', function () {
                     _this.openFull(item);
                 });
-
+                
+                // Долгое нажатие - Меню
                 card.on('hover:long', function () {
                      Lampa.Select.show({
                         title: 'Menu',
                         items: [
-                            { title: 'Favorite', to_fav: true },
+                            { title: 'Add to Favorites', to_fav: true },
                             { title: 'Close' }
                         ],
                         onSelect: function(a) {
@@ -218,6 +278,7 @@
                                     url: item.url,
                                     source: 'ph'
                                 });
+                                Lampa.Noty.show('Added to Favorites');
                             }
                         }
                      });
@@ -245,7 +306,7 @@
             Lampa.Activity.push({
                 url: full_url,
                 title: item.title,
-                component: 'ph_full',
+                component: 'ph_full_view',
                 page: 1
             });
         };
@@ -275,12 +336,13 @@
 
                 var buttons = $('<div class="buttons"></div>');
                 
-                var btn_play = Lampa.Template.get('button', { title: 'Play' });
+                var btn_play = Lampa.Template.get('button', { title: 'Play Video' });
+                
                 btn_play.on('hover:enter', function() {
                     if(data.videos.length > 0) {
                         _this.play(data);
                     } else {
-                        Lampa.Noty.show('No video sources found');
+                        Lampa.Noty.show('Video links not found (Login required?)');
                     }
                 });
                 buttons.append(btn_play);
@@ -317,7 +379,7 @@
 
             if(items.length > 1) {
                 Lampa.Select.show({
-                    title: 'Quality',
+                    title: 'Select Quality',
                     items: items,
                     onSelect: function(a) {
                         playVideo(a.url);
@@ -331,6 +393,7 @@
         return comp;
     }
 
+    // --- Настройки ---
     function addSettings() {
         Lampa.Settings.listener.follow('open', function (e) {
             if (e.name == 'ph_settings') {
@@ -357,7 +420,7 @@
                     body.find('.settings-param__body').append(item);
                 };
 
-                createItem('CORS Proxy', 'proxy', Manifest.proxy);
+                createItem('CORS Proxy (Main)', 'proxy', Manifest.proxy);
                 
                 var toggle = Lampa.Template.get('settings_param', {
                      name: 'Use Proxy',
@@ -377,7 +440,7 @@
         window.plugin_ph_ready = true;
         
         Lampa.Component.add('ph_component', PhComponent);
-        Lampa.Component.add('ph_full', PhFull);
+        Lampa.Component.add('ph_full_view', PhFull);
 
         Lampa.Listener.follow('app', function (e) {
             if (e.type == 'ready') {
