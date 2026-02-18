@@ -2,17 +2,17 @@
     'use strict';
 
     var Manifest = {
-        id: 'ph_rt_plugin_v3',
-        version: '3.0.0',
-        name: 'PH RT',
-        component: 'ph_rt_component',
-        source: 'https://rt.pornhub.com',
-        proxy: 'https://corsproxy.io/?'
+        id: 'ph_global_v4',
+        version: '4.0.0',
+        name: 'PH Global',
+        component: 'ph_component_v4',
+        source: 'https://www.pornhub.com',
+        // Используем allorigins, он часто стабильнее для текста
+        proxy: 'https://api.allorigins.win/raw?url=' 
     };
 
     var Lampa = window.Lampa;
     var Network = Lampa.Network;
-    var Utils = Lampa.Utils;
     var Storage = Lampa.Storage;
 
     var Api = {
@@ -21,37 +21,41 @@
             var proxy = Storage.get('ph_proxy_url', Manifest.proxy);
             var final = proxy + encodeURIComponent(url);
             
-            var params = {
-                headers: {
-                    'Cookie': 'age_verified=1; platform=pc',
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-                }
-            };
-
+            // Простой запрос без заголовков, чтобы не злить CORS
             Network.silent(final, function(str) {
                 success(str);
-            }, error, params);
+            }, function(a, c) {
+                error(a, c);
+            });
         },
 
         list: function (html) {
             var items = [];
             var doc = new DOMParser().parseFromString(html, 'text/html');
             
-            var elements = doc.querySelectorAll('li.js-pop.videoblock, .videoblock, .pcVideoListItem, .wrap .phimage');
+            // Универсальный поиск блоков
+            var elements = doc.querySelectorAll('.pcVideoListItem, .videoblock, .phimage, li[data-video-id]');
             
             elements.forEach(function (el) {
                 var link_el = el.querySelector('a');
                 var img_el = el.querySelector('img');
-                var title_el = el.querySelector('.title a, .videoTitle');
-                var dur_el = el.querySelector('.duration');
+                var title_el = el.querySelector('.title a, .videoTitle, .title');
+                var dur_el = el.querySelector('.duration, .duration-token');
                 
                 if (link_el && img_el) {
                     var link = link_el.getAttribute('href');
-                    if(link.indexOf('viewkey') === -1) return;
+                    // Отсеиваем рекламу и левые ссылки
+                    if(!link || link.indexOf('viewkey') === -1) return;
 
                     var title = title_el ? (title_el.getAttribute('title') || title_el.innerText) : 'Video';
-                    var img = img_el.getAttribute('data-mediumthumb') || img_el.getAttribute('data-src') || img_el.getAttribute('data-thumb_url') || img_el.src;
-                    var duration = dur_el ? dur_el.innerText : '';
+                    
+                    // PH любит прятать картинки в data атрибутах
+                    var img = img_el.getAttribute('data-mediumthumb') || 
+                              img_el.getAttribute('data-src') || 
+                              img_el.getAttribute('data-thumb_url') || 
+                              img_el.src;
+                              
+                    var duration = dur_el ? dur_el.innerText.trim() : '';
                     
                     items.push({
                         type: 'video',
@@ -63,14 +67,15 @@
                 }
             });
             
-            var next = doc.querySelector('.pagination_next a, .page_next a');
+            var next = doc.querySelector('.pagination_next a, .page_next a, #next');
             var next_page = next ? next.getAttribute('href') : false;
 
             return { results: items, page: next_page };
         },
 
         extract: function (html) {
-            var match = html.match(/flashvars_\d+\s*=\s*({.+?});/);
+            // Ищем JSON с данными видео (стандартный метод PH)
+            var match = html.match(/flashvars_\d+\s*=\s*({.+?});/) || html.match(/var\s+flashvars\s*=\s*({.+?});/);
             var result = {};
 
             if (match) {
@@ -88,14 +93,14 @@
                                 var q = Array.isArray(v.quality) ? v.quality[0] : v.quality;
                                 result.videos.push({
                                     title: q + 'p',
-                                    quality: parseInt(q),
+                                    quality: parseInt(q) || 0,
                                     url: v.videoUrl
                                 });
                             }
                         });
                     }
                     result.videos.sort(function(a,b){ return b.quality - a.quality });
-                } catch (e) {}
+                } catch (e) { console.log('PH JSON Parse Error', e); }
             }
             return result;
         }
@@ -115,7 +120,7 @@
 
         comp.build = function () {
             var _this = this;
-            this.activity.head = Lampa.Template.get('head', { title: 'PH RT' });
+            this.activity.head = Lampa.Template.get('head', { title: 'PH Global' });
             
             this.activity.head.querySelector('.open--search').addEventListener('click', function () {
                 Lampa.Input.edit({
@@ -130,7 +135,7 @@
                 });
             });
 
-            this.activity.line = Lampa.Template.get('items_line', { title: 'Главная' });
+            this.activity.line = Lampa.Template.get('items_line', { title: 'Рекомендации' });
             this.activity.render().find('.activity__body').append(this.activity.head);
             this.activity.render().find('.activity__body').append(this.activity.line);
             
@@ -141,12 +146,17 @@
             var _this = this;
             
             Api.get(endpoint, function(html) {
+                // Диагностика ответа
+                if(html.length < 500) {
+                     Lampa.Noty.show('Ошибка: Ответ слишком короткий (' + html.length + ')');
+                }
+                
                 var data = Api.list(html);
                 
                 if(data.results.length === 0) {
-                     // Debug для пользователя
-                     if(html.indexOf('captcha') > -1) Lampa.Noty.show('Ошибка: Капча (Смените IP/VPN)');
-                     else if(html.indexOf('age-verification') > -1) Lampa.Noty.show('Ошибка: 18+ (Нужны Cookies)');
+                     if(html.indexOf('captcha') > -1) Lampa.Noty.show('Блокировка: Капча');
+                     else if(html.indexOf('Access Denied') > -1) Lampa.Noty.show('Блокировка: Доступ запрещен');
+                     else Lampa.Noty.show('Ничего не найдено (Парсер не сработал)');
                 }
                 
                 _this.append(data);
@@ -162,7 +172,8 @@
             var _this = this;
             
             if(!data.results.length) {
-                Lampa.Noty.show('Пусто (Попробуйте включить VPN)');
+                var empty = Lampa.Template.get('empty', {title: 'Пусто', descr: 'Попробуйте сменить прокси в настройках'});
+                this.activity.line.append(empty);
                 return;
             }
 
@@ -182,7 +193,7 @@
                     Lampa.Activity.push({
                         url: element.url,
                         title: element.title,
-                        component: 'ph_rt_view',
+                        component: 'ph_view_v4',
                         page: 1
                     });
                 });
@@ -220,7 +231,7 @@
                 if(data.videos && data.videos.length){
                     _this.show(data);
                 } else {
-                    Lampa.Noty.show('Видео не найдено');
+                    Lampa.Noty.show('Видео не найдено (Login required?)');
                     _this.activity.empty();
                 }
             }, function(){
@@ -263,24 +274,24 @@
         return comp;
     }
 
-    if (!window.ph_rt_loaded) {
-        window.ph_rt_loaded = true;
+    if (!window.ph_v4_loaded) {
+        window.ph_v4_loaded = true;
         
-        Lampa.Component.add('ph_rt_component', Component);
-        Lampa.Component.add('ph_rt_view', View);
+        Lampa.Component.add('ph_component_v4', Component);
+        Lampa.Component.add('ph_view_v4', View);
 
         Lampa.Listener.follow('app', function (e) {
             if (e.type == 'ready') {
-                var ico = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z"/></svg>';
+                var ico = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 3a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h6zm10 0a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1h-6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h6z"/></svg>';
                 var item = Lampa.Template.get('activity_menu_item', {
-                    title: 'PH RT',
+                    title: 'PH',
                     icon: ico
                 });
                 item.on('hover:enter', function () {
                     Lampa.Activity.push({
                         url: '',
-                        title: 'PH RT',
-                        component: 'ph_rt_component',
+                        title: 'PH',
+                        component: 'ph_component_v4',
                         page: 1
                     });
                 });
@@ -291,13 +302,13 @@
         Lampa.Settings.listener.follow('open', function (e) {
             if(e.name == 'main') {
                 var item = Lampa.Template.get('settings_param', {
-                    name: 'PH Proxy URL',
+                    name: 'PH Proxy',
                     value: Storage.get('ph_proxy_url', Manifest.proxy),
-                    descr: ''
+                    descr: 'Поменяйте, если не грузит'
                 });
                 item.on('hover:enter', function(){
                     Lampa.Input.edit({
-                        title: 'Proxy',
+                        title: 'Proxy URL',
                         value: Storage.get('ph_proxy_url', Manifest.proxy),
                         free: true
                     }, function(val){
@@ -308,5 +319,7 @@
                 e.body.find('.settings-param__body').append(item);
             }
         });
+        
+        console.log('PH v4 Loaded');
     }
 })();
