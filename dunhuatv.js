@@ -1,19 +1,16 @@
 (function () {
     'use strict';
 
-    // --- MANIFEST & INIT ---
     if (window.pornhub_plugin) return;
     window.pornhub_plugin = true;
 
     var Manifest = {
         name: 'PornHub',
-        version: '1.2.5',
-        description: 'Advanced plugin with multi-proxy support',
+        version: '1.3.0',
         component: 'pornhub',
         site_url: 'https://www.pornhub.com'
     };
 
-    // --- MODULE: STORAGE ---
     var Storage = {
         get: function (name) {
             return Lampa.Storage.get('ph_' + name, '');
@@ -23,7 +20,6 @@
         }
     };
 
-    // --- MODULE: NETWORK (ADVANCED PROXY ROTATION) ---
     var Network = {
         proxies: [
             'https://corsproxy.io/?',
@@ -33,54 +29,44 @@
         ],
         
         request: function(path, onSuccess, onError) {
-            var _this = this;
             var url = Manifest.site_url + path;
             var custom_proxy = Storage.get('proxy');
-            
-            // Если есть пользовательский прокси, ставим его первым
             var active_proxies = custom_proxy ? [custom_proxy].concat(this.proxies) : this.proxies;
 
             function tryProxy(index) {
                 if (index >= active_proxies.length) {
-                    if (onError) onError('Network Error: All proxies failed');
+                    if (onError) onError();
                     return;
                 }
 
                 var current_proxy = active_proxies[index];
                 var fetch_url = '';
 
-                // Формирование URL в зависимости от типа прокси
                 if (current_proxy.indexOf('allorigins') > -1 || current_proxy.indexOf('codetabs') > -1) {
                     fetch_url = current_proxy + encodeURIComponent(url);
                 } else {
                     fetch_url = current_proxy + url;
                 }
 
-                console.log('[PH] Trying proxy:', current_proxy);
-
                 var network = new Lampa.Reguest();
                 network.silent(fetch_url, function(response) {
                     var html = response;
                     
-                    // Обработка JSON-ответов от некоторых прокси
                     try {
                         var json = JSON.parse(response);
                         if (json.contents) html = json.contents;
                     } catch (e) {}
 
-                    // Проверка валидности ответа (защита от капчи и пустых страниц)
-                    if (!html || html.length < 500 || html.indexOf('captcha') > -1 || html.indexOf('Access Denied') > -1) {
-                        console.warn('[PH] Proxy failed or blocked:', current_proxy);
+                    if (!html || html.length < 500 || html.indexOf('captcha') > -1 || html.indexOf('Access Denied') > -1 || html.indexOf('Cloudflare') > -1) {
                         tryProxy(index + 1);
                     } else {
                         onSuccess(html);
                     }
-                }, function(error) {
-                    console.warn('[PH] Network error:', error);
+                }, function() {
                     tryProxy(index + 1);
                 }, false, {
                     dataType: 'text',
-                    timeout: 15000 // Увеличенный таймаут для медленных прокси
+                    timeout: 15000 
                 });
             }
 
@@ -88,47 +74,34 @@
         }
     };
 
-    // --- MODULE: PARSER (DOM & REGEX) ---
     var Parser = {
         getCards: function(html) {
-            var parser = new DOMParser();
-            var doc = parser.parseFromString(html, "text/html");
+            var cleanHtml = html.replace(/<img/g, '<noload').replace(/<script/g, '<noscript');
+            var doc = $('<div>' + cleanHtml + '</div>');
             var cards = [];
 
-            // 1. Поиск элементов списка (Десктопная версия)
-            var elements = $(doc).find('li.pcVideoListItem, .videoBox');
-
-            // 2. Поиск элементов списка (Мобильная версия - если прокси подменил User-Agent)
-            if (elements.length === 0) {
-                elements = $(doc).find('.video-wrapper, li.js-pop');
-            }
+            var elements = doc.find('li.pcVideoListItem, .videoBox, .video-wrapper, li.js-pop');
 
             elements.each(function () {
                 var el = $(this);
                 
-                // Извлечение заголовка и ссылки
                 var titleNode = el.find('.thumbnail-info-wrapper .title a, .title a, a.title').first();
-                // Если не нашли внутри title, ищем первую ссылку в блоке
                 if (titleNode.length === 0) titleNode = el.find('a').first();
 
                 var link = titleNode.attr('href');
                 var title = titleNode.text().trim() || titleNode.attr('title');
 
-                // Извлечение изображения
-                var imgNode = el.find('.phimage img, .thumb_image').first();
+                var imgNode = el.find('.phimage noload, .thumb_image').first();
                 var img = imgNode.attr('data-mediumthumb') || 
                           imgNode.attr('data-thumb_url') || 
                           imgNode.attr('data-src') || 
                           imgNode.attr('src');
 
-                // Дополнительная информация
                 var duration = el.find('.duration').text().trim();
                 var views = el.find('.views var').text().trim() || el.find('.views').text().trim();
                 var rating = el.find('.value').text().trim();
 
-                // Валидация данных
                 if (link && title && link.indexOf('view_video.php') > -1) {
-                    // Исправление относительных ссылок
                     if (link.indexOf('http') === -1) link = Manifest.site_url + link;
                     if (img && img.indexOf('http') === -1) img = Manifest.site_url + img;
 
@@ -138,7 +111,7 @@
                         url: link,
                         subtitle: (duration ? duration + ' | ' : '') + views,
                         rating: rating,
-                        original: el // Сохраняем элемент для отладки
+                        original: el
                     });
                 }
             });
@@ -147,7 +120,6 @@
         }
     };
 
-    // --- MODULE: COMPONENT (UI) ---
     function PornHub(object) {
         var component = new Lampa.Component();
         var scroll;
@@ -159,15 +131,13 @@
         this.create = function () {
             var _this = this;
             
-            // Создание UI на основе шаблона поиска
             this.activity.target = Lampa.Template.get('activity_search');
             this.activity.target.find('.search__source').text('PornHub');
-            this.activity.target.find('.search__input').attr('placeholder', 'Поиск видео...');
+            this.activity.target.find('.search__input').attr('placeholder', 'Поиск...');
             this.activity.target.find('.search__keyboard').hide();
 
             scroll = this.activity.target.find('.search__results');
 
-            // Биндинг событий поиска
             this.activity.target.find('.search__input').on('keydown', function (e) {
                 if (e.keyCode === 13) {
                     search_query = $(this).val();
@@ -178,7 +148,6 @@
                 _this.startSearch(_this.activity.target.find('.search__input').val());
             });
 
-            // Панель управления
             var controls = $('<div class="ph-controls layer--height"></div>');
             
             var btn_home = $('<div class="selector search__filter-button" style="margin-right:10px;">Главная</div>');
@@ -240,8 +209,7 @@
             var _this = this;
             this.loading(true);
 
-            // Генерация пути запроса
-            var path = '/video?o=mv'; // Most Viewed по умолчанию
+            var path = '/video?o=mv';
             if (search_mode && search_query) {
                 path = '/video/search?search=' + encodeURIComponent(search_query) + '&page=' + page;
             } else if (page > 1) {
@@ -256,12 +224,12 @@
                     _this.append(cards);
                     page++;
                 } else {
-                    if (page === 1) _this.empty('Список пуст. Попробуйте сменить прокси в настройках.');
+                    if (page === 1) _this.empty('Список пуст.');
                 }
             }, function(error) {
                 _this.loading(false);
-                _this.empty('Ошибка: ' + error);
-                Lampa.Noty.show('Ошибка соединения. Проверьте прокси.');
+                _this.empty('Ошибка');
+                Lampa.Noty.show('Ошибка соединения');
             });
         };
 
@@ -278,18 +246,15 @@
                     card.find('.card__view').append('<div style="position:absolute; top:5px; right:5px; background:rgba(0,0,0,0.8); color:#fff; padding:3px 6px; border-radius:4px; font-size:0.8em; font-weight:bold;">'+element.rating+'</div>');
                 }
 
-                // Логика загрузки изображения
                 var img = card.find('.card__img')[0];
                 img.onload = function () { card.addClass('card--loaded'); };
                 img.onerror = function () { img.src = './img/img_broken.svg'; };
                 img.src = element.img;
 
-                // Смена фона при фокусе
                 card.on('hover:focus', function () {
                     Lampa.Background.change(element.img);
                 });
 
-                // Открытие видео
                 card.on('hover:enter', function () {
                     _this.openVideo(element.url, element.title);
                 });
@@ -309,9 +274,6 @@
                 Lampa.Loading.stop();
                 var sources = [];
 
-                // --- ЛОГИКА ИЗВЛЕЧЕНИЯ ВИДЕО (Extractor) ---
-                
-                // 1. Поиск flashvars (Стандартный метод)
                 var flashvarsMatch = html.match(/flashvars_\d+\s*=\s*({.+?});/);
                 if (flashvarsMatch && flashvarsMatch[1]) {
                     try {
@@ -333,10 +295,9 @@
                                 }
                             });
                         }
-                    } catch (e) { console.error('PH Flashvars Parse Error', e); }
+                    } catch (e) {}
                 }
 
-                // 2. Поиск через универсальный Regex (Резервный метод)
                 if (sources.length === 0) {
                     var mp4Regex = /"quality":"(\d+)","videoUrl":"([^"]+)"/g;
                     var match;
@@ -350,10 +311,8 @@
                 }
 
                 if (sources.length > 0) {
-                    // Сортировка по качеству (от лучшего к худшему)
                     sources.sort(function(a,b){ return b.quality - a.quality; });
                     
-                    // Убираем дубликаты
                     var uniqueSources = [];
                     var seenUrls = new Set();
                     sources.forEach(function(s){
@@ -378,12 +337,12 @@
                         onSelect: function(a){ a.action(); }
                     });
                 } else {
-                    Lampa.Noty.show('Не удалось извлечь видеопоток. Возможно требуется премиум.');
+                    Lampa.Noty.show('Видео не найдено');
                 }
 
             }, function() {
                 Lampa.Loading.stop();
-                Lampa.Noty.show('Ошибка загрузки страницы видео');
+                Lampa.Noty.show('Ошибка');
             });
         };
 
@@ -395,7 +354,7 @@
                 nosave: true
             }, function (new_proxy) {
                 Storage.set('proxy', new_proxy);
-                Lampa.Noty.show('Настройки сохранены');
+                Lampa.Noty.show('Сохранено');
             });
         };
 
@@ -407,17 +366,15 @@
         this.empty = function (msg) {
             scroll.append(Lampa.Template.get('empty', {
                 title: msg || 'Пусто',
-                descr: 'Попробуйте обновить страницу или проверить настройки'
+                descr: ''
             }));
         };
     }
 
-    // --- BOOTSTRAP ---
     function startPlugin() {
         window.plugin_ph_ready = true;
         Lampa.Component.add('pornhub', PornHub);
 
-        // Иконка для меню
         var svg_icon = '<svg width="24px" height="24px" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 14H9V8h2v8zm4 0h-2V8h2v8z" fill="currentColor"/></svg>';
         
         var button = $('<li class="menu__item selector" data-action="pornhub"><div class="menu__ico">' + svg_icon + '</div><div class="menu__text">PornHub</div></li>');
