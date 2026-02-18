@@ -1,75 +1,55 @@
 (function () {
     'use strict';
 
-    if (window.dunhuatv_plugin) return;
-    window.dunhuatv_plugin = true;
+    if (window.pornhub_plugin) return;
+    window.pornhub_plugin = true;
 
-    var site_url = 'https://dunhuatv.ru';
+    var site_url = 'https://www.pornhub.com';
 
-    var DunhuaStorage = {
-        get: function (name) { return Lampa.Storage.get('dunhuatv_' + name, ''); },
-        set: function (name, value) { Lampa.Storage.set('dunhuatv_' + name, value); },
-        field: function (name) { return Lampa.Storage.field('dunhuatv_' + name); }
+    var PHStorage = {
+        get: function (name) { return Lampa.Storage.get('ph_' + name, ''); },
+        set: function (name, value) { Lampa.Storage.set('ph_' + name, value); }
     };
 
-    function generateId(url) {
-        var hash = 0;
-        if (!url || url.length === 0) return hash;
-        for (var i = 0; i < url.length; i++) {
-            hash = ((hash << 5) - hash) + url.charCodeAt(i);
-            hash |= 0; 
-        }
-        return Math.abs(hash);
-    }
-
-    // Улучшенная функция запроса с обходом защиты
     function fetchContent(path, onSuccess, onError) {
         var network = new Lampa.Reguest();
         var url = site_url + path;
+        var custom_proxy = PHStorage.get('proxy');
         
-        // Список прокси, которые лучше всего работают с DLE сайтами
-        var proxies = [
-            'https://corsproxy.io/?', 
+        var proxies = custom_proxy ? [custom_proxy] : [
+            'https://corsproxy.io/?',
             'https://api.codetabs.com/v1/proxy?quest=',
             'https://api.allorigins.win/get?url='
         ];
 
-        // Добавляем пользовательский прокси, если есть
-        var custom = DunhuaStorage.get('proxy');
-        if (custom) proxies.unshift(custom);
-
         function tryProxy(index) {
             if (index >= proxies.length) {
-                if (onError) onError('Все прокси недоступны');
+                if (onError) onError();
                 return;
             }
 
             var proxy = proxies[index];
             var fetch_url = proxy + encodeURIComponent(url);
 
-            // Для corsproxy.io не нужно кодировать URL
-            if (proxy.indexOf('corsproxy.io') > -1) {
+            if (proxy.indexOf('corsproxy.io') > -1 || proxy.indexOf('codetabs') > -1) {
                 fetch_url = proxy + url;
             }
 
             network.silent(fetch_url, function(response) {
                 var html = response;
-                // Обработка JSON от allorigins
                 try {
                     var json = JSON.parse(response);
                     if (json.contents) html = json.contents;
                 } catch (e) {}
 
-                // Проверка на заглушки Cloudflare
-                if (!html || html.indexOf('Just a moment') > -1 || html.indexOf('Cloudflare') > -1) {
-                    console.log('DunhuaTV: Proxy ' + index + ' blocked');
+                if (!html || html.length < 500 || html.indexOf('captcha') > -1) {
                     tryProxy(index + 1);
                 } else {
                     onSuccess(html);
                 }
             }, function() {
                 tryProxy(index + 1);
-            }, false, { dataType: 'text', timeout: 5000 });
+            }, false, { dataType: 'text', timeout: 8000 });
         }
 
         tryProxy(0);
@@ -77,68 +57,34 @@
 
     var Parser = {
         getCards: function(html) {
-            // Очистка HTML от скриптов и картинок для ускорения парсинга
-            var cleanHtml = html.replace(/<img/g, '<noload').replace(/<script/g, '<noscript');
-            var doc = $('<div>' + cleanHtml + '</div>');
+            var doc = new DOMParser().parseFromString(html, "text/html");
             var cards = [];
 
-            // 1. Поиск по структуре со скриншота: .sect_content -> .item-poster
-            var elements = doc.find('.item-poster');
-
-            // Резервный поиск
-            if (elements.length === 0) {
-                elements = doc.find('.grid-items__item, .custom-item, .shortstory, .grid-item');
-            }
+            var elements = $(doc).find('li.pcVideoListItem, li.js-pop, .videoBox');
 
             elements.each(function () {
                 var el = $(this);
                 
-                // Ссылка и Заголовок: ищем .item_title (как на скрине)
-                var linkEl = el.find('.item_title, a.item_title').first();
-                // Если это div, ищем внутри него a
-                if (!linkEl.is('a')) linkEl = linkEl.find('a').first();
-                
-                // Если совсем не нашли, берем любую первую ссылку
-                if (linkEl.length === 0) linkEl = el.find('a').first();
-
+                var linkEl = el.find('a').first();
                 var link = linkEl.attr('href');
-                var title = linkEl.text().trim() || linkEl.attr('title');
-
-                // Картинка: ищем .img-block (как на скрине) и берем style
-                var img = '';
-                var imgBlock = el.find('.img-block, .item-poster__img');
-                var style = imgBlock.attr('style');
+                var title = linkEl.attr('title') || el.find('.title a').text().trim() || el.find('.phimage a').attr('title');
                 
-                // Извлекаем URL из background-image
-                if (style && style.indexOf('url') > -1) {
-                    var match = style.match(/url\(['"]?(.*?)['"]?\)/);
-                    if (match) img = match[1];
-                }
-
-                // Резерв: ищем обычный тег img (или noload, т.к. мы заменили их)
-                if (!img) {
-                    var imgTag = el.find('noload, img').first();
-                    img = imgTag.attr('src') || imgTag.attr('data-src');
-                }
-
-                // Доп. инфо
-                var quality = el.find('.quality, .ribbon-quality').text().trim() || '';
-                var status = el.find('.status, .item-meta').text().trim() || '';
+                var imgEl = el.find('img').first();
+                var img = imgEl.attr('data-src') || imgEl.attr('data-mediumthumb') || imgEl.attr('src');
+                var duration = el.find('.duration').text().trim();
+                var views = el.find('.views var').text().trim() || el.find('.views').text().trim();
 
                 if (link && title) {
-                    // Фикс путей
-                    if (link.indexOf('http') === -1) link = site_url + (link.indexOf('/') === 0 ? '' : '/') + link;
-                    if (img && img.indexOf('http') === -1) img = site_url + (img.indexOf('/') === 0 ? '' : '/') + img;
-                    
-                    if (!img) img = './img/img_broken.svg';
+                    if (link.indexOf('http') === -1) link = site_url + link;
+                    if (img && img.indexOf('http') === -1) img = site_url + img;
 
-                    if (link.indexOf('/user/') === -1) {
+                    if (link.indexOf('view_video.php') > -1) {
                         cards.push({
                             title: title,
-                            img: img,
+                            img: img || './img/img_broken.svg',
                             url: link,
-                            quality: quality,
-                            status: status
+                            subtitle: (duration ? duration + ' | ' : '') + views,
+                            original: el
                         });
                     }
                 }
@@ -148,7 +94,7 @@
         }
     };
 
-    function DunhuaTV(object) {
+    function PornHub(object) {
         var component = new Lampa.Component();
         var scroll;
         var items = [];
@@ -159,7 +105,7 @@
         this.create = function () {
             var _this = this;
             this.activity.target = Lampa.Template.get('activity_search');
-            this.activity.target.find('.search__source').text('Дунхуа ТВ');
+            this.activity.target.find('.search__source').text('PH');
             this.activity.target.find('.search__input').attr('placeholder', 'Поиск...');
             this.activity.target.find('.search__keyboard').hide();
 
@@ -175,14 +121,11 @@
                 _this.startSearch(_this.activity.target.find('.search__input').val());
             });
 
-            var controls = $('<div class="dunhuatv-controls layer--height"></div>');
-            var btn_main = $('<div class="selector search__filter-button" style="margin-right:10px;">Главная</div>');
-            btn_main.on('hover:enter', function () { _this.reset(); });
-            
+            var controls = $('<div class="ph-controls layer--height"></div>');
             var btn_set = $('<div class="selector search__filter-button">Настройки</div>');
             btn_set.on('hover:enter', function () { _this.openSettings(); });
 
-            controls.append(btn_main).append(btn_set);
+            controls.append(btn_set);
             this.activity.target.find('.search__head').append(controls);
 
             return this.activity.target;
@@ -233,11 +176,11 @@
             var _this = this;
             this.loading(true);
 
-            var path = '/';
+            var path = '/video?o=mv'; 
             if (search_mode && search_query) {
-                 path = '/index.php?do=search&subaction=search&story=' + encodeURIComponent(search_query);
+                 path = '/video/search?search=' + encodeURIComponent(search_query) + '&page=' + page;
             } else if (page > 1) {
-                path = '/page/' + page + '/';
+                path = '/video?o=mv&page=' + page;
             }
 
             fetchContent(path, function(html){
@@ -247,11 +190,11 @@
                     _this.append(cards);
                     page++;
                 } else if (page === 1) {
-                    _this.empty('Список пуст. Возможно, сайт блокирует прокси.');
+                    _this.empty('Пусто');
                 }
-            }, function(err){
+            }, function(){
                 _this.loading(false);
-                _this.empty('Ошибка сети: ' + err);
+                _this.empty('Ошибка сети');
             });
         };
 
@@ -260,7 +203,7 @@
             data.forEach(function (element) {
                 var card = Lampa.Template.get('card', {
                     title: element.title,
-                    release_year: element.status
+                    release_year: element.subtitle
                 });
                 card.addClass('card--collection');
                 
@@ -290,39 +233,44 @@
             
             fetchContent(path, function (html) {
                 Lampa.Loading.stop();
-                var doc = $('<div>' + html.replace(/<img/g, '<noload').replace(/<script/g, '<noscript') + '</div>');
                 var sources = [];
 
-                // 1. Ищем табы DLE
-                var tabs = doc.find('.tabs .tab, .nav-tabs li');
-                var contents = doc.find('.tabs_content, .tab-pane');
-
-                contents.each(function(i){
-                    var name = tabs.eq(i).text().trim() || ('Источник ' + (i+1));
-                    var iframe = $(this).find('iframe').attr('src') || $(this).find('iframe').attr('data-src');
-                    if(iframe) sources.push({title: name, url: iframe});
-                });
-
-                // 2. Ищем iframe напрямую
-                if(sources.length === 0){
-                    doc.find('iframe').each(function(){
-                        var src = $(this).attr('src') || $(this).attr('data-src');
-                        if(src && src.indexOf('dunhuatv') === -1) {
-                            sources.push({title: 'Плеер', url: src});
+                // Парсинг Flashvars
+                var flashvars = html.match(/flashvars_\d+\s*=\s*({.+?});/);
+                if (flashvars && flashvars[1]) {
+                    try {
+                        var json = JSON.parse(flashvars[1]);
+                        if (json.mediaDefinitions) {
+                            json.mediaDefinitions.forEach(function(m){
+                                if (m.videoUrl && m.format === 'mp4') {
+                                    sources.push({
+                                        title: m.quality + 'p',
+                                        url: m.videoUrl,
+                                        quality: parseInt(m.quality)
+                                    });
+                                } else if (m.videoUrl && m.format === 'hls') {
+                                    sources.push({
+                                        title: 'HLS',
+                                        url: m.videoUrl,
+                                        quality: 1080
+                                    });
+                                }
+                            });
                         }
-                    });
+                    } catch (e) {}
                 }
 
                 if (sources.length > 0) {
+                    sources.sort(function(a,b){ return b.quality - a.quality; });
+                    
                     Lampa.Select.show({
-                        title: 'Выбор источника',
+                        title: 'Качество',
                         items: sources.map(function(s){
                             s.action = function(){
                                 Lampa.Player.play({
                                     url: s.url,
                                     title: title,
-                                    id: generateId(url),
-                                    timeline: { title: title, hash: generateId(url) }
+                                    timeline: { title: title }
                                 });
                             };
                             return s;
@@ -330,23 +278,23 @@
                         onSelect: function(a){ a.action(); }
                     });
                 } else {
-                    Lampa.Noty.show('Плеер не найден');
+                    Lampa.Noty.show('Видео не найдено');
                 }
 
             }, function () {
                 Lampa.Loading.stop();
-                Lampa.Noty.show('Ошибка загрузки');
+                Lampa.Noty.show('Ошибка');
             });
         };
 
         this.openSettings = function () {
             Lampa.Input.edit({
                 title: 'Свой Proxy',
-                value: DunhuaStorage.get('proxy') || '',
+                value: PHStorage.get('proxy') || '',
                 free: true,
                 nosave: true
             }, function (new_proxy) {
-                DunhuaStorage.set('proxy', new_proxy);
+                PHStorage.set('proxy', new_proxy);
                 Lampa.Noty.show('Сохранено');
             });
         };
@@ -365,14 +313,13 @@
     }
 
     function startPlugin() {
-        window.plugin_dunhuatv_ready = true;
-        Lampa.Component.add('dunhuatv', DunhuaTV);
+        window.plugin_ph_ready = true;
+        Lampa.Component.add('pornhub', PornHub);
 
-        var svg_icon = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 2L2 7L12 12L22 7L12 2Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M2 17L12 22L22 17" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M2 12L12 17L22 12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
-        var button = $('<li class="menu__item selector" data-action="dunhua"><div class="menu__ico">' + svg_icon + '</div><div class="menu__text">Дунхуа ТВ</div></li>');
+        var button = $('<li class="menu__item selector" data-action="pornhub"><div class="menu__ico"><svg width="200px" height="200px" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M16 3H4V13C4 17.4183 7.58172 21 12 21C16.4183 21 20 17.4183 20 13V3H16ZM16 3H12V11C12 11.5523 11.5523 12 11 12C10.4477 12 10 11.5523 10 11V3" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></div><div class="menu__text">PH</div></li>');
 
         button.on('hover:enter', function () {
-            Lampa.Activity.push({ url: '', title: 'Дунхуа ТВ', component: 'dunhuatv', page: 1 });
+            Lampa.Activity.push({ url: '', title: 'PH', component: 'pornhub', page: 1 });
         });
 
         $('.menu .menu__list').eq(0).append(button);
