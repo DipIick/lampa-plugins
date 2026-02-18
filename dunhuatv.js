@@ -49,7 +49,7 @@
                 }
             }, function() {
                 tryProxy(index + 1);
-            }, false, { dataType: 'text', timeout: 8000 });
+            }, false, { dataType: 'text', timeout: 10000 });
         }
 
         tryProxy(0);
@@ -60,19 +60,30 @@
             var doc = new DOMParser().parseFromString(html, "text/html");
             var cards = [];
 
-            var elements = $(doc).find('li.pcVideoListItem, li.js-pop, .videoBox');
+            var elements = $(doc).find('li.pcVideoListItem');
+
+            if (elements.length === 0) {
+                elements = $(doc).find('.videoBox, li.js-pop');
+            }
 
             elements.each(function () {
                 var el = $(this);
                 
-                var linkEl = el.find('a').first();
-                var link = linkEl.attr('href');
-                var title = linkEl.attr('title') || el.find('.title a').text().trim() || el.find('.phimage a').attr('title');
+                var titleEl = el.find('.thumbnail-info-wrapper .title a').first();
+                if (titleEl.length === 0) titleEl = el.find('.title a').first();
+                if (titleEl.length === 0) titleEl = el.find('a').first();
+
+                var link = titleEl.attr('href');
+                if (!link) link = el.find('a').attr('href');
+
+                var title = titleEl.text().trim() || titleEl.attr('title');
                 
-                var imgEl = el.find('img').first();
-                var img = imgEl.attr('data-src') || imgEl.attr('data-mediumthumb') || imgEl.attr('src');
+                var imgEl = el.find('.phimage img').first();
+                var img = imgEl.attr('data-mediumthumb') || imgEl.attr('data-thumb_url') || imgEl.attr('data-src') || imgEl.attr('src');
+                
                 var duration = el.find('.duration').text().trim();
-                var views = el.find('.views var').text().trim() || el.find('.views').text().trim();
+                var views = el.find('.views').text().trim();
+                var rating = el.find('.value').text().trim();
 
                 if (link && title) {
                     if (link.indexOf('http') === -1) link = site_url + link;
@@ -84,6 +95,7 @@
                             img: img || './img/img_broken.svg',
                             url: link,
                             subtitle: (duration ? duration + ' | ' : '') + views,
+                            rating: rating,
                             original: el
                         });
                     }
@@ -122,10 +134,13 @@
             });
 
             var controls = $('<div class="ph-controls layer--height"></div>');
+            var btn_main = $('<div class="selector search__filter-button" style="margin-right:10px;">Главная</div>');
+            btn_main.on('hover:enter', function () { _this.reset(); });
+            
             var btn_set = $('<div class="selector search__filter-button">Настройки</div>');
             btn_set.on('hover:enter', function () { _this.openSettings(); });
 
-            controls.append(btn_set);
+            controls.append(btn_main).append(btn_set);
             this.activity.target.find('.search__head').append(controls);
 
             return this.activity.target;
@@ -207,6 +222,10 @@
                 });
                 card.addClass('card--collection');
                 
+                if (element.rating) {
+                     card.find('.card__view').append('<div style="position:absolute; top:5px; right:5px; background:rgba(0,0,0,0.7); color:#fff; padding:2px 6px; border-radius:4px; font-size:0.7em;">'+element.rating+'</div>');
+                }
+
                 var img = card.find('.card__img')[0];
                 img.onload = function () { card.addClass('card--loaded'); };
                 img.onerror = function () { img.src = './img/img_broken.svg'; };
@@ -235,7 +254,6 @@
                 Lampa.Loading.stop();
                 var sources = [];
 
-                // Парсинг Flashvars
                 var flashvars = html.match(/flashvars_\d+\s*=\s*({.+?});/);
                 if (flashvars && flashvars[1]) {
                     try {
@@ -316,7 +334,7 @@
         window.plugin_ph_ready = true;
         Lampa.Component.add('pornhub', PornHub);
 
-        var button = $('<li class="menu__item selector" data-action="pornhub"><div class="menu__ico"><svg width="200px" height="200px" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M16 3H4V13C4 17.4183 7.58172 21 12 21C16.4183 21 20 17.4183 20 13V3H16ZM16 3H12V11C12 11.5523 11.5523 12 11 12C10.4477 12 10 11.5523 10 11V3" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></div><div class="menu__text">PH</div></li>');
+        var button = $('<li class="menu__item selector" data-action="pornhub"><div class="menu__ico"><svg width="24px" height="24px" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 14H9V8h2v8zm4 0h-2V8h2v8z" fill="currentColor"/></svg></div><div class="menu__text">PH</div></li>');
 
         button.on('hover:enter', function () {
             Lampa.Activity.push({ url: '', title: 'PH', component: 'pornhub', page: 1 });
