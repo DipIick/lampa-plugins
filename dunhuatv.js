@@ -1,325 +1,318 @@
 (function () {
     'use strict';
 
-    var Manifest = {
-        id: 'ph_global_v4',
-        version: '4.0.0',
-        name: 'PH Global',
-        component: 'ph_component_v4',
-        source: 'https://www.pornhub.com',
-        // Используем allorigins, он часто стабильнее для текста
-        proxy: 'https://api.allorigins.win/raw?url=' 
-    };
+    function create() {
+      var html;
+      var timer;
+      var network = new Lampa.Reguest();
+      var loaded = {};
 
-    var Lampa = window.Lampa;
-    var Network = Lampa.Network;
-    var Storage = Lampa.Storage;
+      this.create = function () {
+        html = $("<div class=\"new-interface-info\">\n            <div class=\"new-interface-info__body\">\n                <div class=\"new-interface-info__head\"></div>\n                <div class=\"new-interface-info__title\"></div>\n                <div class=\"new-interface-info__details\"></div>\n                <div class=\"new-interface-info__description\"></div>\n            </div>\n        </div>");
+      };
 
-    var Api = {
-        get: function (method, success, error) {
-            var url = Manifest.source + method;
-            var proxy = Storage.get('ph_proxy_url', Manifest.proxy);
-            var final = proxy + encodeURIComponent(url);
-            
-            // Простой запрос без заголовков, чтобы не злить CORS
-            Network.silent(final, function(str) {
-                success(str);
-            }, function(a, c) {
-                error(a, c);
+      this.update = function (data) {
+        html.find('.new-interface-info__head,.new-interface-info__details').text('---');
+        html.find('.new-interface-info__title').text(data.title);
+        html.find('.new-interface-info__description').text(data.overview || Lampa.Lang.translate('full_notext'));
+        Lampa.Background.change(Lampa.Api.img(data.backdrop_path, 'w200'));
+        this.load(data);
+      };
+
+      this.draw = function (data) {
+        var create = ((data.release_date || data.first_air_date || '0000') + '').slice(0, 4);
+        var vote = parseFloat((data.vote_average || 0) + '').toFixed(1);
+        var head = [];
+        var details = [];
+        var countries = Lampa.Api.sources.tmdb.parseCountries(data);
+        var pg = Lampa.Api.sources.tmdb.parsePG(data);
+        if (create !== '0000') head.push('<span>' + create + '</span>');
+        if (countries.length > 0) head.push(countries.join(', '));
+        if (vote > 0) details.push('<div class="full-start__rate"><div>' + vote + '</div><div>TMDB</div></div>');
+        if (data.genres && data.genres.length > 0) details.push(data.genres.map(function (item) {
+          return Lampa.Utils.capitalizeFirstLetter(item.name);
+        }).join(' | '));
+        if (data.runtime) details.push(Lampa.Utils.secondsToTime(data.runtime * 60, true));
+        if (pg) details.push('<span class="full-start__pg" style="font-size: 0.9em;">' + pg + '</span>');
+        html.find('.new-interface-info__head').empty().append(head.join(', '));
+        html.find('.new-interface-info__details').html(details.join('<span class="new-interface-info__split">&#9679;</span>'));
+      };
+
+      this.load = function (data) {
+        var _this = this;
+
+        clearTimeout(timer);
+        var url = Lampa.TMDB.api((data.name ? 'tv' : 'movie') + '/' + data.id + '?api_key=' + Lampa.TMDB.key() + '&append_to_response=content_ratings,release_dates&language=' + Lampa.Storage.get('language'));
+        if (loaded[url]) return this.draw(loaded[url]);
+        timer = setTimeout(function () {
+          network.clear();
+          network.timeout(5000);
+          network.silent(url, function (movie) {
+            loaded[url] = movie;
+
+            _this.draw(movie);
+          });
+        }, 300);
+      };
+
+      this.render = function () {
+        return html;
+      };
+
+      this.empty = function () {};
+
+      this.destroy = function () {
+        html.remove();
+        loaded = {};
+        html = null;
+      };
+    }
+
+    function component(object) {
+      var network = new Lampa.Reguest();
+      var scroll = new Lampa.Scroll({
+        mask: true,
+        over: true,
+        scroll_by_item: true
+      });
+      var items = [];
+      var html = $('<div class="new-interface"><img class="full-start__background"></div>');
+      var active = 0;
+      var newlampa = Lampa.Manifest.app_digital >= 166;
+      var info;
+      var lezydata;
+      var viewall = Lampa.Storage.field('card_views_type') == 'view' || Lampa.Storage.field('navigation_type') == 'mouse';
+      var background_img = html.find('.full-start__background');
+      var background_last = '';
+      var background_timer;
+
+      this.create = function () {};
+
+      this.empty = function () {
+        var button;
+
+        if (object.source == 'tmdb') {
+          button = $('<div class="empty__footer"><div class="simple-button selector">' + Lampa.Lang.translate('change_source_on_cub') + '</div></div>');
+          button.find('.selector').on('hover:enter', function () {
+            Lampa.Storage.set('source', 'cub');
+            Lampa.Activity.replace({
+              source: 'cub'
             });
-        },
-
-        list: function (html) {
-            var items = [];
-            var doc = new DOMParser().parseFromString(html, 'text/html');
-            
-            // Универсальный поиск блоков
-            var elements = doc.querySelectorAll('.pcVideoListItem, .videoblock, .phimage, li[data-video-id]');
-            
-            elements.forEach(function (el) {
-                var link_el = el.querySelector('a');
-                var img_el = el.querySelector('img');
-                var title_el = el.querySelector('.title a, .videoTitle, .title');
-                var dur_el = el.querySelector('.duration, .duration-token');
-                
-                if (link_el && img_el) {
-                    var link = link_el.getAttribute('href');
-                    // Отсеиваем рекламу и левые ссылки
-                    if(!link || link.indexOf('viewkey') === -1) return;
-
-                    var title = title_el ? (title_el.getAttribute('title') || title_el.innerText) : 'Video';
-                    
-                    // PH любит прятать картинки в data атрибутах
-                    var img = img_el.getAttribute('data-mediumthumb') || 
-                              img_el.getAttribute('data-src') || 
-                              img_el.getAttribute('data-thumb_url') || 
-                              img_el.src;
-                              
-                    var duration = dur_el ? dur_el.innerText.trim() : '';
-                    
-                    items.push({
-                        type: 'video',
-                        title: title,
-                        url: link,
-                        img: img,
-                        duration: duration
-                    });
-                }
-            });
-            
-            var next = doc.querySelector('.pagination_next a, .page_next a, #next');
-            var next_page = next ? next.getAttribute('href') : false;
-
-            return { results: items, page: next_page };
-        },
-
-        extract: function (html) {
-            // Ищем JSON с данными видео (стандартный метод PH)
-            var match = html.match(/flashvars_\d+\s*=\s*({.+?});/) || html.match(/var\s+flashvars\s*=\s*({.+?});/);
-            var result = {};
-
-            if (match) {
-                try {
-                    var json = JSON.parse(match[1]);
-                    result = {
-                        title: json.video_title,
-                        img: json.image_url,
-                        videos: []
-                    };
-
-                    if (json.mediaDefinitions) {
-                        json.mediaDefinitions.forEach(function (v) {
-                            if (v.format === 'mp4' && v.videoUrl) {
-                                var q = Array.isArray(v.quality) ? v.quality[0] : v.quality;
-                                result.videos.push({
-                                    title: q + 'p',
-                                    quality: parseInt(q) || 0,
-                                    url: v.videoUrl
-                                });
-                            }
-                        });
-                    }
-                    result.videos.sort(function(a,b){ return b.quality - a.quality });
-                } catch (e) { console.log('PH JSON Parse Error', e); }
-            }
-            return result;
+          });
         }
-    };
 
-    function Component(object) {
-        var comp = new Lampa.InteractionMain(object);
+        var empty = new Lampa.Empty();
+        html.append(empty.render(button));
+        this.start = empty.start;
+        this.activity.loader(false);
+        this.activity.toggle();
+      };
 
-        comp.create = function () {
-            this.activity.loader(true);
-            return this.render();
-        };
+      this.loadNext = function () {
+        var _this = this;
 
-        comp.start = function () {
-            this.build();
-        };
+        if (this.next && !this.next_wait && items.length) {
+          this.next_wait = true;
+          this.next(function (new_data) {
+            _this.next_wait = false;
+            new_data.forEach(_this.append.bind(_this));
+            Lampa.Layer.visible(items[active + 1].render(true));
+          }, function () {
+            _this.next_wait = false;
+          });
+        }
+      };
 
-        comp.build = function () {
-            var _this = this;
-            this.activity.head = Lampa.Template.get('head', { title: 'PH Global' });
-            
-            this.activity.head.querySelector('.open--search').addEventListener('click', function () {
-                Lampa.Input.edit({
-                    title: 'Поиск',
-                    value: '',
-                    free: true,
-                    nosave: true
-                }, function (new_value) {
-                    _this.activity.line.find('.card').remove();
-                    _this.activity.loader(true);
-                    _this.load('/video/search?search=' + encodeURIComponent(new_value));
-                });
-            });
+      this.push = function () {};
 
-            this.activity.line = Lampa.Template.get('items_line', { title: 'Рекомендации' });
-            this.activity.render().find('.activity__body').append(this.activity.head);
-            this.activity.render().find('.activity__body').append(this.activity.line);
-            
-            this.load('/');
-        };
+      this.build = function (data) {
+        var _this2 = this;
 
-        comp.load = function (endpoint) {
-            var _this = this;
-            
-            Api.get(endpoint, function(html) {
-                // Диагностика ответа
-                if(html.length < 500) {
-                     Lampa.Noty.show('Ошибка: Ответ слишком короткий (' + html.length + ')');
-                }
-                
-                var data = Api.list(html);
-                
-                if(data.results.length === 0) {
-                     if(html.indexOf('captcha') > -1) Lampa.Noty.show('Блокировка: Капча');
-                     else if(html.indexOf('Access Denied') > -1) Lampa.Noty.show('Блокировка: Доступ запрещен');
-                     else Lampa.Noty.show('Ничего не найдено (Парсер не сработал)');
-                }
-                
-                _this.append(data);
-                _this.activity.loader(false);
-            }, function(a, c) {
-                _this.activity.loader(false);
-                Lampa.Noty.show('Ошибка сети: ' + c);
-                _this.activity.empty();
-            });
-        };
+        lezydata = data;
+        console.trace();
+        info = new create(object);
+        info.create();
+        scroll.minus(info.render());
+        data.slice(0, viewall ? data.length : 2).forEach(this.append.bind(this));
+        html.append(info.render());
+        html.append(scroll.render());
 
-        comp.append = function (data) {
-            var _this = this;
-            
-            if(!data.results.length) {
-                var empty = Lampa.Template.get('empty', {title: 'Пусто', descr: 'Попробуйте сменить прокси в настройках'});
-                this.activity.line.append(empty);
-                return;
-            }
+        if (newlampa) {
+          Lampa.Layer.update(html);
+          Lampa.Layer.visible(scroll.render(true));
+          scroll.onEnd = this.loadNext.bind(this);
 
-            data.results.forEach(function (element) {
-                var card = Lampa.Template.get('card', {
-                    title: element.title,
-                    release_year: element.duration
-                });
-                
-                card.addClass('card--video');
-                var img = card.find('.card__img')[0];
-                img.onload = function () { card.addClass('card--loaded'); };
-                img.onerror = function () { img.src = './img/img_broken.svg'; };
-                img.src = element.img;
+          scroll.onWheel = function (step) {
+            if (!Lampa.Controller.own(_this2)) _this2.start();
+            if (step > 0) _this2.down();else if (active > 0) _this2.up();
+          };
+        }
 
-                card.on('hover:enter', function () {
-                    Lampa.Activity.push({
-                        url: element.url,
-                        title: element.title,
-                        component: 'ph_view_v4',
-                        page: 1
-                    });
-                });
-                
-                _this.activity.line.append(card);
-            });
+        this.activity.loader(false);
+        this.activity.toggle();
+      };
 
-            if (data.page) {
-                var more = Lampa.Template.get('more');
-                more.on('hover:enter', function () {
-                    _this.activity.line.find('.selector').remove();
-                    _this.load(data.page);
-                });
-                this.activity.line.append(more);
-            }
-            
-            this.activity.toggle();
-        };
+      this.background = function (elem) {
+        var new_background = Lampa.Api.img(elem.backdrop_path, 'w1280');
+        clearTimeout(background_timer);
+        if (new_background == background_last) return;
+        background_timer = setTimeout(function () {
+          background_img.removeClass('loaded');
 
-        return comp;
-    }
+          background_img[0].onload = function () {
+            background_img.addClass('loaded');
+          };
 
-    function View(object) {
-        var comp = new Lampa.InteractionMain(object);
+          background_img[0].onerror = function () {
+            background_img.removeClass('loaded');
+          };
 
-        comp.create = function () {
-            this.activity.loader(true);
-            return this.render();
-        };
+          background_last = new_background;
+          setTimeout(function () {
+            background_img[0].src = background_last;
+          }, 300);
+        }, 1000);
+      };
 
-        comp.start = function () {
-            var _this = this;
-            Api.get(object.url, function(html){
-                var data = Api.extract(html);
-                if(data.videos && data.videos.length){
-                    _this.show(data);
-                } else {
-                    Lampa.Noty.show('Видео не найдено (Login required?)');
-                    _this.activity.empty();
-                }
-            }, function(){
-                _this.activity.empty();
-            });
-        };
-        
-        comp.show = function(data) {
-            var _this = this;
-            var desc = Lampa.Template.get('description', {
-                title: data.title,
-                descr: ''
-            });
-            
-            Lampa.Activity.active().activity.render().find('.background').attr('src', data.img);
+      this.append = function (element) {
+        var _this3 = this;
 
-            var btn = Lampa.Template.get('button', { title: 'Смотреть' });
-            btn.on('hover:enter', function(){
-                Lampa.Select.show({
-                    title: 'Качество',
-                    items: data.videos,
-                    onSelect: function(v){
-                        var vid = {
-                            title: data.title,
-                            url: v.url,
-                            timeline: { hash: Lampa.Utils.uid(data.title) }
-                        };
-                        Lampa.Player.play(vid);
-                        Lampa.Player.playlist([vid]);
-                    }
-                });
-            });
-            
-            this.activity.render().find('.activity__body').append(desc);
-            this.activity.render().find('.activity__body').append(btn);
-            this.activity.loader(false);
-            this.activity.toggle();
-        };
-
-        return comp;
-    }
-
-    if (!window.ph_v4_loaded) {
-        window.ph_v4_loaded = true;
-        
-        Lampa.Component.add('ph_component_v4', Component);
-        Lampa.Component.add('ph_view_v4', View);
-
-        Lampa.Listener.follow('app', function (e) {
-            if (e.type == 'ready') {
-                var ico = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 3a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h6zm10 0a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1h-6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h6z"/></svg>';
-                var item = Lampa.Template.get('activity_menu_item', {
-                    title: 'PH',
-                    icon: ico
-                });
-                item.on('hover:enter', function () {
-                    Lampa.Activity.push({
-                        url: '',
-                        title: 'PH',
-                        component: 'ph_component_v4',
-                        page: 1
-                    });
-                });
-                $('.activity__menu .activity__menu-list').append(item);
-            }
+        if (element.ready) return;
+        element.ready = true;
+        var item = new Lampa.InteractionLine(element, {
+          url: element.url,
+          card_small: true,
+          cardClass: element.cardClass,
+          genres: object.genres,
+          object: object,
+          card_wide: true,
+          nomore: element.nomore
         });
-        
-        Lampa.Settings.listener.follow('open', function (e) {
-            if(e.name == 'main') {
-                var item = Lampa.Template.get('settings_param', {
-                    name: 'PH Proxy',
-                    value: Storage.get('ph_proxy_url', Manifest.proxy),
-                    descr: 'Поменяйте, если не грузит'
-                });
-                item.on('hover:enter', function(){
-                    Lampa.Input.edit({
-                        title: 'Proxy URL',
-                        value: Storage.get('ph_proxy_url', Manifest.proxy),
-                        free: true
-                    }, function(val){
-                        Storage.set('ph_proxy_url', val);
-                        item.find('.settings-param__value').text(val);
-                    });
-                });
-                e.body.find('.settings-param__body').append(item);
+        item.create();
+        item.onDown = this.down.bind(this);
+        item.onUp = this.up.bind(this);
+        item.onBack = this.back.bind(this);
+
+        item.onToggle = function () {
+          active = items.indexOf(item);
+        };
+
+        if (this.onMore) item.onMore = this.onMore.bind(this);
+
+        item.onFocus = function (elem) {
+          info.update(elem);
+
+          _this3.background(elem);
+        };
+
+        item.onHover = function (elem) {
+          info.update(elem);
+
+          _this3.background(elem);
+        };
+
+        item.onFocusMore = info.empty.bind(info);
+        scroll.append(item.render());
+        items.push(item);
+      };
+
+      this.back = function () {
+        Lampa.Activity.backward();
+      };
+
+      this.down = function () {
+        active++;
+        active = Math.min(active, items.length - 1);
+        if (!viewall) lezydata.slice(0, active + 2).forEach(this.append.bind(this));
+        items[active].toggle();
+        scroll.update(items[active].render());
+      };
+
+      this.up = function () {
+        active--;
+
+        if (active < 0) {
+          active = 0;
+          Lampa.Controller.toggle('head');
+        } else {
+          items[active].toggle();
+          scroll.update(items[active].render());
+        }
+      };
+
+      this.start = function () {
+        var _this4 = this;
+
+        Lampa.Controller.add('content', {
+          link: this,
+          toggle: function toggle() {
+            if (_this4.activity.canRefresh()) return false;
+
+            if (items.length) {
+              items[active].toggle();
             }
+          },
+          update: function update() {},
+          left: function left() {
+            if (Navigator.canmove('left')) Navigator.move('left');else Lampa.Controller.toggle('menu');
+          },
+          right: function right() {
+            Navigator.move('right');
+          },
+          up: function up() {
+            if (Navigator.canmove('up')) Navigator.move('up');else Lampa.Controller.toggle('head');
+          },
+          down: function down() {
+            if (Navigator.canmove('down')) Navigator.move('down');
+          },
+          back: this.back
         });
-        
-        console.log('PH v4 Loaded');
+        Lampa.Controller.toggle('content');
+      };
+
+      this.refresh = function () {
+        this.activity.loader(true);
+        this.activity.need_refresh = true;
+      };
+
+      this.pause = function () {};
+
+      this.stop = function () {};
+
+      this.render = function () {
+        return html;
+      };
+
+      this.destroy = function () {
+        network.clear();
+        Lampa.Arrays.destroy(items);
+        scroll.destroy();
+        if (info) info.destroy();
+        html.remove();
+        items = null;
+        network = null;
+        lezydata = null;
+      };
     }
+
+    function startPlugin() {
+      window.plugin_interface_ready = true;
+      var old_interface = Lampa.InteractionMain;
+      var new_interface = component;
+
+      Lampa.InteractionMain = function (object) {
+        var use = new_interface;
+        if (!(object.source == 'tmdb' || object.source == 'cub')) use = old_interface;
+        if (window.innerWidth < 767) use = old_interface;
+        if (!Lampa.Account.hasPremium()) use = old_interface;
+        if (Lampa.Manifest.app_digital < 153) use = old_interface;
+        return new use(object);
+      };
+
+      Lampa.Template.add('new_interface_style', "\n        <style>\n        .new-interface .card--small.card--wide {\n            width: 18.3em;\n        }\n        \n        .new-interface-info {\n            position: relative;\n            padding: 1.5em;\n            height: 24em;\n        }\n        \n        .new-interface-info__body {\n            width: 80%;\n            padding-top: 1.1em;\n        }\n        \n        .new-interface-info__head {\n            color: rgba(255, 255, 255, 0.6);\n            margin-bottom: 1em;\n            font-size: 1.3em;\n            min-height: 1em;\n        }\n        \n        .new-interface-info__head span {\n            color: #fff;\n        }\n        \n        .new-interface-info__title {\n            font-size: 4em;\n            font-weight: 600;\n            margin-bottom: 0.3em;\n            overflow: hidden;\n            -o-text-overflow: \".\";\n            text-overflow: \".\";\n            display: -webkit-box;\n            -webkit-line-clamp: 1;\n            line-clamp: 1;\n            -webkit-box-orient: vertical;\n            margin-left: -0.03em;\n            line-height: 1.3;\n        }\n        \n        .new-interface-info__details {\n            margin-bottom: 1.6em;\n            display: -webkit-box;\n            display: -webkit-flex;\n            display: -moz-box;\n            display: -ms-flexbox;\n            display: flex;\n            -webkit-box-align: center;\n            -webkit-align-items: center;\n            -moz-box-align: center;\n            -ms-flex-align: center;\n            align-items: center;\n            -webkit-flex-wrap: wrap;\n            -ms-flex-wrap: wrap;\n            flex-wrap: wrap;\n            min-height: 1.9em;\n            font-size: 1.1em;\n        }\n        \n        .new-interface-info__split {\n            margin: 0 1em;\n            font-size: 0.7em;\n        }\n        \n        .new-interface-info__description {\n            font-size: 1.2em;\n            font-weight: 300;\n            line-height: 1.5;\n            overflow: hidden;\n            -o-text-overflow: \".\";\n            text-overflow: \".\";\n            display: -webkit-box;\n            -webkit-line-clamp: 4;\n            line-clamp: 4;\n            -webkit-box-orient: vertical;\n            width: 70%;\n        }\n        \n        .new-interface .card-more__box {\n            padding-bottom: 95%;\n        }\n        \n        .new-interface .full-start__background {\n            height: 108%;\n            top: -6em;\n        }\n        \n        .new-interface .full-start__rate {\n            font-size: 1.3em;\n            margin-right: 0;\n        }\n        \n        .new-interface .card__promo {\n            display: none;\n        }\n        \n        .new-interface .card.card--wide+.card-more .card-more__box {\n            padding-bottom: 95%;\n        }\n        \n        .new-interface .card.card--wide .card-watched {\n            display: none !important;\n        }\n        \n        body.light--version .new-interface-info__body {\n            width: 69%;\n            padding-top: 1.5em;\n        }\n        \n        body.light--version .new-interface-info {\n            height: 25.3em;\n        }\n        </style>\n    ");
+      $('body').append(Lampa.Template.get('new_interface_style', {}, true));
+    }
+
+    if (!window.plugin_interface_ready) startPlugin();
+
 })();
