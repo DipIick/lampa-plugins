@@ -2,12 +2,12 @@
     'use strict';
 
     var Manifest = {
-        id: 'ph_rt_plugin',
-        version: '2.1.0',
+        id: 'ph_rt_plugin_v3',
+        version: '3.0.0',
         name: 'PH RT',
         component: 'ph_rt_component',
         source: 'https://rt.pornhub.com',
-        proxy: 'https://api.codetabs.com/v1/proxy?quest=' 
+        proxy: 'https://corsproxy.io/?'
     };
 
     var Lampa = window.Lampa;
@@ -21,28 +21,36 @@
             var proxy = Storage.get('ph_proxy_url', Manifest.proxy);
             var final = proxy + encodeURIComponent(url);
             
+            var params = {
+                headers: {
+                    'Cookie': 'age_verified=1; platform=pc',
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                }
+            };
+
             Network.silent(final, function(str) {
                 success(str);
-            }, error);
+            }, error, params);
         },
 
         list: function (html) {
             var items = [];
             var doc = new DOMParser().parseFromString(html, 'text/html');
-            var elements = doc.querySelectorAll('li.js-pop.videoblock');
             
-            if(!elements.length) elements = doc.querySelectorAll('.videoblock');
-
+            var elements = doc.querySelectorAll('li.js-pop.videoblock, .videoblock, .pcVideoListItem, .wrap .phimage');
+            
             elements.forEach(function (el) {
-                var link_el = el.querySelector('a[href*="viewkey"]');
+                var link_el = el.querySelector('a');
                 var img_el = el.querySelector('img');
-                var title_el = el.querySelector('.title a');
+                var title_el = el.querySelector('.title a, .videoTitle');
                 var dur_el = el.querySelector('.duration');
                 
-                if (link_el && img_el && title_el) {
+                if (link_el && img_el) {
                     var link = link_el.getAttribute('href');
-                    var title = title_el.getAttribute('title') || title_el.innerText;
-                    var img = img_el.getAttribute('data-mediumthumb') || img_el.getAttribute('data-src') || img_el.src;
+                    if(link.indexOf('viewkey') === -1) return;
+
+                    var title = title_el ? (title_el.getAttribute('title') || title_el.innerText) : 'Video';
+                    var img = img_el.getAttribute('data-mediumthumb') || img_el.getAttribute('data-src') || img_el.getAttribute('data-thumb_url') || img_el.src;
                     var duration = dur_el ? dur_el.innerText : '';
                     
                     items.push({
@@ -55,7 +63,7 @@
                 }
             });
             
-            var next = doc.querySelector('.pagination_next a');
+            var next = doc.querySelector('.pagination_next a, .page_next a');
             var next_page = next ? next.getAttribute('href') : false;
 
             return { results: items, page: next_page };
@@ -134,11 +142,18 @@
             
             Api.get(endpoint, function(html) {
                 var data = Api.list(html);
+                
+                if(data.results.length === 0) {
+                     // Debug для пользователя
+                     if(html.indexOf('captcha') > -1) Lampa.Noty.show('Ошибка: Капча (Смените IP/VPN)');
+                     else if(html.indexOf('age-verification') > -1) Lampa.Noty.show('Ошибка: 18+ (Нужны Cookies)');
+                }
+                
                 _this.append(data);
                 _this.activity.loader(false);
-            }, function() {
+            }, function(a, c) {
                 _this.activity.loader(false);
-                Lampa.Noty.show('Ошибка сети');
+                Lampa.Noty.show('Ошибка сети: ' + c);
                 _this.activity.empty();
             });
         };
@@ -147,7 +162,7 @@
             var _this = this;
             
             if(!data.results.length) {
-                Lampa.Noty.show('Пусто');
+                Lampa.Noty.show('Пусто (Попробуйте включить VPN)');
                 return;
             }
 
